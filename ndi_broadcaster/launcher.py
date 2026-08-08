@@ -87,13 +87,22 @@ def run(
         f"{config.target_url.rstrip('/')}/healthz", timeout_seconds=config.healthz_timeout_seconds
     )
 
-    sender = VideoSender(config.ndi_source_name, config.width, config.height, config.fps)
-
-    audio_sender: AudioSender | None = None
     audio_config = load_audio_config(Path(audio_config_path))
     input_device = resolve_input_device(audio_config, discover_audio_devices().inputs)
-    if audio_config.enabled and input_device is not None:
-        audio_sender = AudioSender(sender._sender, input_device)
+    will_attach_audio = audio_config.enabled and input_device is not None
+
+    sender = VideoSender(
+        config.ndi_source_name,
+        config.width,
+        config.height,
+        config.fps,
+        open_immediately=not will_attach_audio,
+    )
+
+    audio_sender: AudioSender | None = None
+    if will_attach_audio:
+        audio_sender = AudioSender(sender.sender, input_device)
+        sender.open()
         audio_sender.start()
     elif audio_config.enabled:
         print(

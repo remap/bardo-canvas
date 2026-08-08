@@ -22,21 +22,11 @@ class AudioSender:
         self._audio_frame.sample_rate = sample_rate
         self._audio_frame.num_channels = channels
 
-        # cyndilib's Sender.set_audio_frame() raises "Cannot add frame while
-        # sender is open" if the sender was already opened (as it is by the
-        # time launcher.py's run() gets here, since VideoSender.__init__
-        # already called sender.open() for the video frame). Sender.open()
-        # is also what actually attaches/allocates the audio frame's internal
-        # buffers (Sender.set_audio_frame() alone does not), so a sender that
-        # was already running has to be briefly closed and reopened to pick
-        # up the newly-attached audio frame; the existing video frame is
-        # reattached the same way when open() runs again.
-        was_running = sender._running
-        if was_running:
-            sender.close()
+        # The caller (launcher.py's run()) must construct the VideoSender with
+        # open_immediately=False and call .open() only after this constructor
+        # runs, so set_audio_frame() below never hits cyndilib's "Cannot add
+        # frame while sender is open" guard.
         sender.set_audio_frame(self._audio_frame)
-        if was_running:
-            sender.open()
         self._sender = sender
 
         self._stream = sd.InputStream(
