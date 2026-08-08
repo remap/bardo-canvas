@@ -25,6 +25,11 @@ if [[ "$HEALTHZ_HOST" == "0.0.0.0" ]]; then
   HEALTHZ_HOST="localhost"
 fi
 
+# Point the broadcaster at the host/port the server actually started on, so a
+# LAYOUT_DRIVER_PORT override does not leave it targeting config/broadcaster.yaml's
+# hardcoded URL.
+export LAYOUT_DRIVER_TARGET_URL="https://${HEALTHZ_HOST}:${LAYOUT_DRIVER_PORT}/"
+
 uv run python -c "
 from ndi_broadcaster.launcher import wait_for_healthy
 wait_for_healthy('https://${HEALTHZ_HOST}:${LAYOUT_DRIVER_PORT}/healthz', timeout_seconds=30.0)

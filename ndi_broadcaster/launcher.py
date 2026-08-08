@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -101,6 +102,19 @@ def _sender_thread_loop(
             next_deadline = time.monotonic()
 
 
+def resolve_target_url(config: BroadcasterConfig, env: dict[str, str]) -> BroadcasterConfig:
+    """Apply the LAYOUT_DRIVER_TARGET_URL override, if set.
+
+    run.sh derives this from the host/port the server actually started on, so a
+    LAYOUT_DRIVER_PORT override reaches the broadcaster instead of leaving it
+    pointed at the hardcoded target_url in config/broadcaster.yaml.
+    """
+    override = env.get("LAYOUT_DRIVER_TARGET_URL")
+    if not override:
+        return config
+    return config.model_copy(update={"target_url": override})
+
+
 async def _capture_loop(
     config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
 ) -> None:
@@ -155,6 +169,7 @@ def run(
     audio_config_path: str = "config/audio.yaml",
 ) -> None:
     config = load_broadcaster_config(Path(config_path))
+    config = resolve_target_url(config, dict(os.environ))
     if config.capture_backend == "sck":
         raise NotImplementedError(
             "The 'sck' capture backend is not implemented yet; "
