@@ -18,6 +18,8 @@ class VideoSender:
         *,
         open_immediately: bool = True,
     ) -> None:
+        self._width = width
+        self._height = height
         self._sender = Sender(ndi_source_name)
         self._video_frame = VideoSendFrame()
         self._video_frame.set_resolution(width, height)
@@ -35,6 +37,14 @@ class VideoSender:
         self._sender.open()
 
     def send(self, frame: np.ndarray) -> None:
+        # A mismatched shape does not merely fail this write: cyndilib's internal
+        # buffer is left non-null, so every subsequent write raises too. Reject the
+        # frame before it can reach write_data at all.
+        expected_shape = (self._height, self._width, 4)
+        if frame.shape != expected_shape:
+            raise ValueError(
+                f"frame shape {frame.shape} does not match sender resolution {expected_shape}"
+            )
         self._video_frame.write_data(np.ascontiguousarray(frame).reshape(-1))
         self._sender.send_video_async()
 

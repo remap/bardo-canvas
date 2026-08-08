@@ -60,7 +60,9 @@ async def _capture_loop(
 
         def on_frame(params: dict) -> None:
             try:
-                frame = decode_screencast_frame(params["data"])
+                frame = decode_screencast_frame(
+                    params["data"], target_width=config.width, target_height=config.height
+                )
                 sender.send(frame)
             except Exception:
                 logger.exception("Failed to decode/send a captured frame; skipping it")
