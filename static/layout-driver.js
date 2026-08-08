@@ -58,7 +58,7 @@ function buildRoot(layoutConfig) {
   return containers;
 }
 
-function connectWebSocket(handlers) {
+function connectWebSocket(handlers, onConnectionChange) {
   function connect() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -69,11 +69,13 @@ function connectWebSocket(handlers) {
       }
     });
     ws.addEventListener("open", () => {
+      onConnectionChange(true);
       for (const handler of handlers) {
         handler({ type: "_connected" });
       }
     });
     ws.addEventListener("close", () => {
+      onConnectionChange(false);
       setTimeout(connect, 1000);
     });
     return ws;
@@ -85,6 +87,7 @@ export async function initLayoutDriver() {
   const layoutConfig = await fetchScreens();
   const containers = buildRoot(layoutConfig);
   const messageHandlers = [];
+  let isConnected = false;
 
   const driver = {
     layoutConfig,
@@ -97,10 +100,18 @@ export async function initLayoutDriver() {
     },
     onMessage(handler) {
       messageHandlers.push(handler);
+      // App code may do async work between initLayoutDriver() and registering its
+      // handler, by which point the socket's "open" event has already fired. Replay
+      // it so late registrants still get their initial resync.
+      if (isConnected) {
+        handler({ type: "_connected" });
+      }
     },
   };
 
-  connectWebSocket(messageHandlers);
+  connectWebSocket(messageHandlers, (connected) => {
+    isConnected = connected;
+  });
 
   return driver;
 }
