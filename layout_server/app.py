@@ -18,6 +18,7 @@ from .audio import (
 from .config import LayoutConfig, load_layout_config
 from .screen_store import ScreenImageStore
 from .screens_api import register_screen_routes
+from .screenshot import ScreenshotBroker, register_screenshot_routes
 from .ws_manager import ConnectionManager
 
 
@@ -56,6 +57,9 @@ def create_app(
     store = ScreenImageStore()
     connections = ConnectionManager()
     register_screen_routes(app, state.layout_config, store, connections)
+
+    screenshot_broker = ScreenshotBroker()
+    register_screenshot_routes(app, connections, screenshot_broker)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
