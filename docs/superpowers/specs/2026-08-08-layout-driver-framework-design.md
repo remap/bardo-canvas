@@ -72,7 +72,8 @@ Serves the active app's static bundle plus the shared framework assets, and brok
 - `GET /healthz` — liveness check; the NDI broadcaster's launcher polls this before starting Chrome (same pattern karaoke-test uses).
 - `POST /screens/{id}/image` — push a new frame for one screen. Body is raw image bytes (`Content-Type: image/png` or `image/jpeg`), optional `?transition_ms=` query param (default 500). Validates the screen id exists (404 if not) and that the bytes decode as an image (400 if not, via Pillow). Stores the latest bytes in memory keyed by screen id, bumps a per-screen monotonic `version`, and broadcasts `{"type": "frame", "screen": id, "version": n, "transition_ms": t}` to all connected WebSocket clients.
 - `GET /screens/{id}/image?v=N` — returns the current stored bytes for that screen (404 if nothing has been pushed yet). The `v` query param is a cache-buster the client controls, not interpreted by the server.
-- `WS /ws` — server→client push channel carrying the `frame` messages above. One-way; the client doesn't send anything meaningful back. On reconnect (network hiccup, browser reload), the client re-fetches every screen's current image via `GET /screens/{id}/image` to resync, since it may have missed pushes while disconnected.
+- `WS /ws` — primarily a server→client push channel carrying the `frame` messages above; the one exception is the screenshot flow (§3.2a), where the server sends a request and the client sends back a result. On reconnect (network hiccup, browser reload), the client re-fetches every screen's current image via `GET /screens/{id}/image` to resync, since it may have missed pushes while disconnected.
+- `POST /api/screenshot` — see §3.2a. Any app calls this to get a PNG of the full composited wall as currently displayed.
 - HTTPS via a self-signed cert. `run.sh` generates one on first run if `LAYOUT_DRIVER_SSL_CERT`/`LAYOUT_DRIVER_SSL_KEY` aren't set and no cert exists at the default path, covering `localhost`/`127.0.0.1`. No auth on any endpoint — this is a trusted-LAN kiosk tool, not internet-facing; documented as an explicit assumption, not an oversight.
 - Which app's static bundle is served is controlled by `APP_DIR` (env var, also settable via `run.sh` argument) pointing at `apps/<name>/static/`. The server always additionally serves `/layout-driver.js` and `/api/screens` regardless of which app is active.
 
@@ -82,6 +83,16 @@ Serves the active app's static bundle plus the shared framework assets, and brok
 - Primary API: `LayoutDriver.getScreenContainer(id) → {element, width, height, x, y}` — a plain DOM node an app can mount anything into (a p5.js instance, a `<video>`, a WebGL canvas, hand-rolled 2D drawing).
 - Convenience API for push-driven apps: `LayoutDriver.enableImageMode()` creates a `<canvas>` inside each container, opens the `/ws` connection, and on each `frame` message fetches `/screens/{id}/image?v={version}` and draws it into that screen's canvas with a cover-fit crop (like CSS `object-fit: cover` — scale to fill, crop the overflow, keep aspect) and a crossfade over `transition_ms`. This is what makes "generate roughly-screen-shaped images and push them" require zero cropping math in the app itself.
 - Apps that only need direct rendering (e.g. the p5 sketches) never call `enableImageMode()` and just use `getScreenContainer`.
+
+### 3.2a Full-wall screenshots (framework capability, called by apps)
+
+Surfaced by the flux-gallery app's need to archive "what did the whole wall look like at this moment," but implemented once in the framework since any app can use it. Composited client-side rather than via a second headless browser instance — avoids running a duplicate Chrome just to take a picture of what the first one is already showing:
+
+1. A caller (any app, any language) does `POST /api/screenshot` against `layout_server`.
+2. The server generates a `request_id`, sends `{"type": "screenshot_request", "request_id": ...}` over `/ws` to the connected browser client.
+3. `layout-driver.js` handles this by creating an offscreen `3840×2160` canvas, and for every screen, finding the rendering surface inside that screen's container (`container.element.querySelector("canvas")` — true whether it was created by `enableImageMode()` or by a p5 instance; sketches are expected to expose exactly one canvas as their primary drawable surface) and `drawImage()`-ing it into the offscreen canvas at that screen's known rect. No cropping math needed here — unlike the push-image path, this is a direct placement, since the source canvas is already exactly the container's size.
+4. The composited canvas is exported via `toBlob()` and `POST`ed back to `/api/screenshot-result/{request_id}`.
+5. The server's original `POST /api/screenshot` call (still pending, held open) resolves with those bytes. If no browser client responds within a short timeout (e.g. 2s) — no kiosk page open, or it's unresponsive — the endpoint returns `504`.
 
 ### 3.3 Audio: browser output → OS loopback → broadcaster input → NDI
 
@@ -135,6 +146,8 @@ If `audio.yaml` has `enabled: false`, or a configured device name isn't found in
 
 **Audio (either app shape, opt-in):** app creates an `<audio>` element and calls `LayoutDriver.routeAudioElement(el)` → element's sink is set to the configured loopback output device → OS loopback presents the same audio as an input device → `ndi_broadcaster`'s `InputStream` captures it → muxed into the NDI stream as its audio channel.
 
+**Screenshot (either app shape, opt-in):** app calls `POST /api/screenshot` → server round-trips a request over `/ws` to the browser → browser composites all 6 screens' current canvases into one PNG and posts it back → server returns those bytes to the original caller.
+
 ## 5. Repo structure
 
 ```
@@ -147,13 +160,15 @@ layout-driver/
   config/audio.yaml
   runtime/audio_devices.json   # regenerated on every layout_server startup, not committed
   apps/
-    test-pattern/         # zero-dependency static bundle: labeled solid-color rects per screen,
-                           # used to smoke-test the whole pipeline before either real app exists
-    flux-gallery/          # (spec'd/built after this framework)
-    noraebang-generative/  # (spec'd/built after this framework)
+    test-pattern/          # zero-dependency static bundle: labeled solid-color rects per screen,
+                            # used to smoke-test the whole pipeline before either real app exists
+    flux-gallery/          # see 2026-08-08-flux-gallery-app-design.md
+    noraebang-generative/  # see 2026-08-08-noraebang-generative-app-design.md
   run.sh                  # cert bootstrap, starts layout_server, waits for /healthz, starts broadcaster
   docs/superpowers/specs/
 ```
+
+Apps are strictly isolated under their own `apps/<name>/` directory (own static assets, own config, own optional backend process, own `run.sh` if they need one) — nothing app-specific ever lives in `layout_server/`, `ndi_broadcaster/`, or `static/`. Both sample apps' specs were written after this one but fed back into it (§3.2a, §3.3) rather than requiring framework changes once built.
 
 ## 6. Error handling
 
@@ -162,12 +177,14 @@ layout-driver/
 - Broadcaster launcher polls `/healthz` with a timeout before touching Chrome/Playwright; fails loudly (non-zero exit, clear log line) rather than launching against a dead server.
 - Config validation (overlapping screen rects, unknown module_size, etc.) fails fast at server startup, not at first request.
 - A configured audio device name (input or output) not found in the discovery list logs a warning and disables audio for that side rather than crashing the server, broadcaster, or app.
+- `POST /api/screenshot` with no connected browser client, or one that doesn't respond within the timeout, returns `504` rather than hanging indefinitely.
 
 ## 7. Testing
 
 - `pytest` unit tests for `screens.yaml` loading and rect computation, using the exact fixture table in §2 as expected output, plus an overlap-rejection test.
 - A small JS unit test (or plain Node script run in CI) for the cover-fit crop math, covering the three aspect ratios actually present (9:7, 2:1, 4:1).
 - A `pytest` unit test for the device-name-matching function (exact match, case-insensitive substring match, not-found → `None`/fallback), run against a fixture device list — no real audio hardware needed.
+- A JS unit test for the screenshot compositing placement math (given the §2 screen-rect fixtures and stub canvases, assert each is drawn at its correct offset in the 3840×2160 composite) — direct placement only, no cropping, so this is simpler than the cover-fit test above. The end-to-end request/response round trip over `/ws` is covered by the manual pipeline smoke test below.
 - Manual pipeline smoke test using `apps/test-pattern/`: run `run.sh`, confirm each screen shows its correctly-positioned/sized labeled rectangle in the captured NDI output before either real app is built. NDI/capture correctness beyond that is verified manually (no practical way to unit test actual OS-level screen capture or NDI output).
 
 ## 8. Explicit non-goals
