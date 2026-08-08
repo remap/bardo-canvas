@@ -6,7 +6,7 @@
   </head>
   <body>
     <script type="module">
-      import { initLayoutDriver } from "/layout-driver.js";
+      import { initLayoutDriver, enableScreenshotResponder } from "/layout-driver.js";
 
       const COLORS = {
         F: "#e63946",
@@ -33,6 +33,8 @@
         ctx.font = "48px sans-serif";
         ctx.fillText(`${screen.name} (${screen.rect.width}x${screen.rect.height})`, 20, 60);
       }
+
+      enableScreenshotResponder(driver);
     </script>
   </body>
 </html>
