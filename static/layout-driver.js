@@ -1,4 +1,5 @@
-import { computeCoverFit } from "./geometry.js";
+import { computeCoverFit, computeCompositePlacements } from "./geometry.js";
+import { matchDeviceByName } from "./device-match.js";
 
 const CANVAS_WIDTH = 3840;
 const CANVAS_HEIGHT = 2160;
@@ -186,4 +187,63 @@ export function enableImageMode(driver) {
   });
 
   return { canvases: new Map([...layers].map(([id, layer]) => [id, layer.canvases[layer.activeIndex]])) };
+}
+
+export function enableScreenshotResponder(driver) {
+  function findCanvas(screenId) {
+    const container = driver.getScreenContainer(screenId);
+    return container.element.querySelector("canvas");
+  }
+
+  async function composite() {
+    const offscreen = document.createElement("canvas");
+    offscreen.width = 3840;
+    offscreen.height = 2160;
+    const ctx = offscreen.getContext("2d");
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, offscreen.width, offscreen.height);
+
+    for (const placement of computeCompositePlacements(driver.layoutConfig.screens)) {
+      const canvas = findCanvas(placement.id);
+      if (!canvas) {
+        continue;
+      }
+      ctx.drawImage(canvas, placement.dx, placement.dy, placement.dWidth, placement.dHeight);
+    }
+
+    return new Promise((resolve) => offscreen.toBlob(resolve, "image/png"));
+  }
+
+  driver.onMessage(async (message) => {
+    if (message.type !== "screenshot_request") {
+      return;
+    }
+    const blob = await composite();
+    await fetch(`/api/screenshot-result/${message.request_id}`, { method: "POST", body: blob });
+  });
+
+  return { composite };
+}
+
+export async function routeAudioElement(el) {
+  const response = await fetch("/api/audio-config");
+  const config = await response.json();
+  if (!config.enabled || !config.output_device) {
+    return;
+  }
+
+  await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const outputs = devices
+    .filter((device) => device.kind === "audiooutput")
+    .map((device) => ({ deviceId: device.deviceId, label: device.label }));
+
+  const match = matchDeviceByName(config.output_device, outputs);
+  if (!match) {
+    console.warn(`Audio output device not found: ${config.output_device}`);
+    return;
+  }
+  if (typeof el.setSinkId === "function") {
+    await el.setSinkId(match.deviceId);
+  }
 }
