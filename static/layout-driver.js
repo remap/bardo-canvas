@@ -1,9 +1,6 @@
 import { computeCoverFit, computeCompositePlacements } from "./geometry.js";
 import { matchDeviceByName } from "./device-match.js";
 
-const CANVAS_WIDTH = 3840;
-const CANVAS_HEIGHT = 2160;
-
 async function fetchScreens() {
   const response = await fetch("/api/screens");
   if (!response.ok) {
@@ -13,6 +10,10 @@ async function fetchScreens() {
 }
 
 function buildRoot(layoutConfig) {
+  // config/screens.yaml is the single source of truth for canvas dimensions.
+  const canvasWidth = layoutConfig.canvas.width;
+  const canvasHeight = layoutConfig.canvas.height;
+
   document.body.style.margin = "0";
   document.body.style.overflow = "hidden";
   document.body.style.background = "black";
@@ -22,8 +23,8 @@ function buildRoot(layoutConfig) {
   root.style.position = "absolute";
   root.style.top = "0";
   root.style.left = "0";
-  root.style.width = `${CANVAS_WIDTH}px`;
-  root.style.height = `${CANVAS_HEIGHT}px`;
+  root.style.width = `${canvasWidth}px`;
+  root.style.height = `${canvasHeight}px`;
   root.style.background = "black";
   root.style.transformOrigin = "top left";
   document.body.appendChild(root);
@@ -49,7 +50,7 @@ function buildRoot(layoutConfig) {
   }
 
   function rescale() {
-    const scale = Math.min(window.innerWidth / CANVAS_WIDTH, window.innerHeight / CANVAS_HEIGHT);
+    const scale = Math.min(window.innerWidth / canvasWidth, window.innerHeight / canvasHeight);
     root.style.transform = `scale(${scale})`;
   }
   window.addEventListener("resize", rescale);
@@ -214,8 +215,8 @@ export function enableScreenshotResponder(driver) {
 
   async function composite() {
     const offscreen = document.createElement("canvas");
-    offscreen.width = 3840;
-    offscreen.height = 2160;
+    offscreen.width = driver.layoutConfig.canvas.width;
+    offscreen.height = driver.layoutConfig.canvas.height;
     const ctx = offscreen.getContext("2d");
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, offscreen.width, offscreen.height);
