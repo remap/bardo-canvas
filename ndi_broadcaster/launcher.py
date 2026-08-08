@@ -100,20 +100,21 @@ def run(
     )
 
     audio_sender: AudioSender | None = None
-    if will_attach_audio:
-        audio_sender = AudioSender(sender.sender, input_device)
-        sender.open()
-        audio_sender.start()
-    elif audio_config.enabled:
-        print(
-            f"Audio input device not found: {audio_config.input_device!r} — continuing without audio"
-        )
-
-    stop_event = threading.Event()
     try:
-        asyncio.run(_capture_loop(config, sender, stop_event))
-    except KeyboardInterrupt:
-        stop_event.set()
+        if will_attach_audio:
+            audio_sender = AudioSender(sender.sender, input_device)
+            sender.open()
+            audio_sender.start()
+        elif audio_config.enabled:
+            print(
+                f"Audio input device not found: {audio_config.input_device!r} — continuing without audio"
+            )
+
+        stop_event = threading.Event()
+        try:
+            asyncio.run(_capture_loop(config, sender, stop_event))
+        except KeyboardInterrupt:
+            stop_event.set()
     finally:
         if audio_sender is not None:
             audio_sender.stop()
