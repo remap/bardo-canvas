@@ -1,0 +1,3 @@
+enabled: true
+input_device: "BlackHole 2ch"
+output_device: "BlackHole 2ch"
