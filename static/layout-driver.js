@@ -201,7 +201,15 @@ export function enableImageMode(driver) {
     }
   });
 
-  return { canvases: new Map([...layers].map(([id, layer]) => [id, layer.canvases[layer.activeIndex]])) };
+  return {
+    getActiveCanvas(screenId) {
+      const layer = layers.get(screenId);
+      if (!layer) {
+        return undefined;
+      }
+      return layer.canvases[layer.activeIndex];
+    },
+  };
 }
 
 export function enableScreenshotResponder(driver) {
