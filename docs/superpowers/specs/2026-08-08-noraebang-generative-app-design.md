@@ -5,7 +5,7 @@ Scope: `apps/noraebang-generative/` — a validation app built on the layout-dri
 
 ## 1. Purpose
 
-Prove out the framework's *direct-render* path (as opposed to the Flux app's push-image path): six independent p5.js sketches, one per screen, each owning its own canvas and draw loop via `LayoutDriver.getScreenContainer(id)`. Dark, neon, noraebang (Korean karaoke room) aesthetic — purely generative, not audio-reactive, plus a looped ambient audio track exercising the framework's audio-output path.
+Prove out the framework's *direct-render* path (as opposed to the Flux app's push-image path): six independent p5.js sketches, one per screen, each owning its own canvas and draw loop via `driver.getScreenContainer(id)` (where `driver` is the object returned by `initLayoutDriver()`). Dark, neon, noraebang (Korean karaoke room) aesthetic — purely generative, not audio-reactive, plus a looped ambient audio track exercising the framework's audio-output path.
 
 ## 2. Architecture
 
@@ -50,15 +50,15 @@ screens:
 
 On load, `index.html`'s bootstrap script:
 
-1. Awaits `LayoutDriver.ready` (screens loaded from `/api/screens`).
-2. Fetches `config/noraebang.yaml`, and for each screen: dynamically `import()`s the assigned sketch module, gets that screen's container via `LayoutDriver.getScreenContainer(id)`, and constructs `new p5(sketchFactory, container.element)`.
+1. `import`s `initLayoutDriver` and `routeAudioElement` from `/layout-driver.js`, and `await`s `const driver = await initLayoutDriver();` (screens loaded from `/api/screens` as part of that call — there is no separate `.ready` to await, `initLayoutDriver()` itself resolves once the driver is usable).
+2. Fetches `config/noraebang.yaml`, and for each screen: dynamically `import()`s the assigned sketch module, gets that screen's container via `driver.getScreenContainer(id)`, and constructs `new p5(sketchFactory, container.element)`.
 3. Each p5 instance calls `p.createCanvas(container.width, container.height)` inside its own `setup()` — sized exactly to its screen, no cropping needed since these are native-resolution sketches, not pushed images.
 
-This app never touches `enableImageMode()`, `/ws`, or the push API — the layout-server and WebSocket relay are irrelevant to it, as noted in the framework spec's data-flow examples.
+This app never touches `enableImageMode(driver)`, `/ws`, or the push API — the layout-server and WebSocket relay are irrelevant to it, as noted in the framework spec's data-flow examples.
 
 ## 5. Audio
 
-A single `<audio loop>` element, `src="assets/track.mp3"`, created on page load and passed to `LayoutDriver.routeAudioElement()` (routes its output to the configured loopback device per the framework's `config/audio.yaml`, so it reaches the NDI broadcast).
+A single `<audio loop>` element, `src="assets/track.mp3"`, created on page load and passed to `routeAudioElement(el)` (a standalone function imported alongside `initLayoutDriver`, not a method on the driver object — routes the element's output to the configured loopback device per the framework's `config/audio.yaml`, so it reaches the NDI broadcast).
 
 `assets/track.mp3` ships as a placeholder — a simple generated ambient loop, not a licensed music track, since sourcing real copyrighted audio isn't something to do without the user supplying it. The file path is fixed but swappable; dropping in a real track later requires no code change.
 
