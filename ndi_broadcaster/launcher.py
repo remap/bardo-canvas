@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import httpx
+import numpy as np
 from playwright.async_api import async_playwright
 
 from layout_server.audio import discover_audio_devices, load_audio_config
@@ -39,6 +40,66 @@ def wait_for_healthy(url: str, timeout_seconds: float, poll_interval_seconds: fl
     ) from last_error
 
 
+class _LatestFrameSlot:
+    """A single-slot, thread-safe handoff of the most recent captured frame.
+
+    Deliberately not a queue: a backlog of stale frames is worthless for a live
+    wall, so a new frame simply replaces any un-taken predecessor.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: str | None = None
+
+    def put(self, data: str) -> None:
+        with self._lock:
+            self._data = data
+
+    def take(self) -> str | None:
+        with self._lock:
+            data, self._data = self._data, None
+            return data
+
+
+def _sender_thread_loop(
+    frame_slot: _LatestFrameSlot,
+    sender: VideoSender,
+    config: BroadcasterConfig,
+    stop_event: threading.Event,
+) -> None:
+    """Decode and send frames off the event loop, at a steady clock.
+
+    CDP only emits screencast frames on compositor updates, so a static wall would
+    otherwise stop producing NDI output entirely. Re-sending the last decoded frame
+    holds the configured frame rate regardless of page activity.
+    """
+    frame_interval = 1.0 / config.fps
+    last_frame: np.ndarray | None = None
+    next_deadline = time.monotonic()
+    while not stop_event.is_set():
+        data = frame_slot.take()
+        if data is not None:
+            try:
+                last_frame = decode_screencast_frame(
+                    data, target_width=config.width, target_height=config.height
+                )
+            except Exception:
+                logger.exception("Failed to decode a captured frame; skipping it")
+        if last_frame is not None:
+            try:
+                sender.send(last_frame)
+            except Exception:
+                logger.exception("Failed to send a frame; skipping it")
+        next_deadline += frame_interval
+        # Sleep only the time still owed on this frame's budget: sender.send() already
+        # self-clocks, so a flat sleep of frame_interval would halve the output rate.
+        remaining = next_deadline - time.monotonic()
+        if remaining > 0:
+            stop_event.wait(remaining)
+        else:
+            next_deadline = time.monotonic()
+
+
 async def _capture_loop(
     config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
 ) -> None:
@@ -58,26 +119,34 @@ async def _capture_loop(
             {"format": "jpeg", "quality": 80, "maxWidth": config.width, "maxHeight": config.height},
         )
 
+        frame_slot = _LatestFrameSlot()
+
         def on_frame(params: dict) -> None:
-            try:
-                frame = decode_screencast_frame(
-                    params["data"], target_width=config.width, target_height=config.height
-                )
-                sender.send(frame)
-            except Exception:
-                logger.exception("Failed to decode/send a captured frame; skipping it")
-            finally:
-                asyncio.create_task(
-                    client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
-                )
+            # Decoding and sending happen on the sender thread; the event loop only
+            # stashes the raw payload and acks, so it is never starved by capture work.
+            frame_slot.put(params["data"])
+            asyncio.create_task(
+                client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+            )
 
         client.on("Page.screencastFrame", on_frame)
+
+        sender_thread = threading.Thread(
+            target=_sender_thread_loop,
+            args=(frame_slot, sender, config, stop_event),
+            daemon=True,
+        )
+        sender_thread.start()
 
         try:
             while not stop_event.is_set():
                 await asyncio.sleep(0.1)
         finally:
-            await browser.close()
+            stop_event.set()
+            try:
+                sender_thread.join(timeout=5.0)
+            finally:
+                await browser.close()
 
 
 def run(

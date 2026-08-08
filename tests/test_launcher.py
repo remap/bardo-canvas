@@ -4,7 +4,11 @@ import threading
 
 import pytest
 
-from ndi_broadcaster.launcher import HealthCheckTimeoutError, wait_for_healthy
+from ndi_broadcaster.launcher import (
+    HealthCheckTimeoutError,
+    _LatestFrameSlot,
+    wait_for_healthy,
+)
 
 
 class _HealthyHandler(http.server.BaseHTTPRequestHandler):
@@ -33,3 +37,17 @@ def test_wait_for_healthy_times_out():
         wait_for_healthy(
             "http://127.0.0.1:1/healthz", timeout_seconds=1.0, poll_interval_seconds=0.2
         )
+
+
+def test_latest_frame_slot_starts_empty():
+    assert _LatestFrameSlot().take() is None
+
+
+def test_latest_frame_slot_keeps_only_the_latest_value():
+    slot = _LatestFrameSlot()
+    slot.put("first")
+    slot.put("second")
+
+    assert slot.take() == "second"
+    # No backlog: the superseded frame is gone, not queued behind the latest one.
+    assert slot.take() is None
