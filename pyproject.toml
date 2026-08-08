@@ -1,0 +1,34 @@
+[project]
+name = "layout-driver"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pyyaml>=6.0",
+    "pydantic>=2.9",
+    "pillow>=11.0",
+    "sounddevice>=0.5",
+    "cyndilib>=0.0.9",
+    "playwright>=1.48",
+    "httpx>=0.27",
+    "cryptography>=43.0",
+    "numpy>=2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.7",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.hatch.build.targets.wheel]
+packages = ["layout_server"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
