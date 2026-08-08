@@ -16,6 +16,9 @@ from .audio import (
     write_audio_devices_file,
 )
 from .config import LayoutConfig, load_layout_config
+from .screen_store import ScreenImageStore
+from .screens_api import register_screen_routes
+from .ws_manager import ConnectionManager
 
 
 @dataclass
@@ -49,6 +52,10 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.layout = state
+
+    store = ScreenImageStore()
+    connections = ConnectionManager()
+    register_screen_routes(app, state.layout_config, store, connections)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
