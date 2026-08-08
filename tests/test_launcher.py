@@ -1,5 +1,6 @@
 import http.server
 import socketserver
+import textwrap
 import threading
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from ndi_broadcaster.launcher import (
     HealthCheckTimeoutError,
     _LatestFrameSlot,
+    run,
     wait_for_healthy,
 )
 
@@ -37,6 +39,24 @@ def test_wait_for_healthy_times_out():
         wait_for_healthy(
             "http://127.0.0.1:1/healthz", timeout_seconds=1.0, poll_interval_seconds=0.2
         )
+
+
+def test_run_rejects_unimplemented_sck_backend(tmp_path, monkeypatch):
+    config_path = tmp_path / "broadcaster.yaml"
+    config_path.write_text(
+        textwrap.dedent("""
+            target_url: "https://localhost:8443/"
+            capture_backend: sck
+        """)
+    )
+    # If the backend check did not come first, run() would try to reach the network.
+    monkeypatch.setattr(
+        "ndi_broadcaster.launcher.wait_for_healthy",
+        lambda *args, **kwargs: pytest.fail("wait_for_healthy must not run for sck"),
+    )
+
+    with pytest.raises(NotImplementedError, match="sck"):
+        run(config_path=str(config_path))
 
 
 def test_latest_frame_slot_starts_empty():

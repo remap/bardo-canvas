@@ -155,6 +155,12 @@ def run(
     audio_config_path: str = "config/audio.yaml",
 ) -> None:
     config = load_broadcaster_config(Path(config_path))
+    if config.capture_backend == "sck":
+        raise NotImplementedError(
+            "The 'sck' capture backend is not implemented yet; "
+            "set capture_backend: cdp in config/broadcaster.yaml"
+        )
+
     wait_for_healthy(
         f"{config.target_url.rstrip('/')}/healthz", timeout_seconds=config.healthz_timeout_seconds
     )

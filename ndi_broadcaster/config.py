@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel
@@ -8,7 +9,7 @@ from pydantic import BaseModel
 
 class BroadcasterConfig(BaseModel):
     target_url: str = "https://localhost:8443/"
-    capture_backend: str = "cdp"
+    capture_backend: Literal["cdp", "sck"] = "cdp"
     ndi_source_name: str = "Layout Driver"
     width: int = 3840
     height: int = 2160
