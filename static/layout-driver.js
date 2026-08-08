@@ -1,3 +1,5 @@
+import { computeCoverFit } from "./geometry.js";
+
 const CANVAS_WIDTH = 3840;
 const CANVAS_HEIGHT = 2160;
 
@@ -100,4 +102,80 @@ export async function initLayoutDriver() {
   connectWebSocket(messageHandlers);
 
   return driver;
+}
+
+function drawCoverFit(ctx, image, canvasWidth, canvasHeight) {
+  const fit = computeCoverFit(image.width, image.height, canvasWidth, canvasHeight);
+  ctx.drawImage(image, fit.sx, fit.sy, fit.sWidth, fit.sHeight, fit.dx, fit.dy, fit.dWidth, fit.dHeight);
+}
+
+async function loadScreenImage(screenId, version) {
+  const response = await fetch(`/screens/${screenId}/image?v=${version}`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch image for ${screenId}: ${response.status}`);
+  }
+  const blob = await response.blob();
+  return createImageBitmap(blob);
+}
+
+export function enableImageMode(driver) {
+  const layers = new Map();
+
+  for (const screen of driver.layoutConfig.screens) {
+    const container = driver.getScreenContainer(screen.id);
+    container.element.style.position = "relative";
+
+    const canvasA = document.createElement("canvas");
+    const canvasB = document.createElement("canvas");
+    for (const canvas of [canvasA, canvasB]) {
+      canvas.width = container.width;
+      canvas.height = container.height;
+      canvas.style.position = "absolute";
+      canvas.style.top = "0";
+      canvas.style.left = "0";
+      canvas.style.transition = "opacity 300ms linear";
+      container.element.appendChild(canvas);
+    }
+    canvasB.style.opacity = "0";
+
+    layers.set(screen.id, { canvases: [canvasA, canvasB], activeIndex: 0 });
+  }
+
+  async function applyFrame(screenId, version, transitionMs) {
+    const layer = layers.get(screenId);
+    if (!layer) {
+      return;
+    }
+    const image = await loadScreenImage(screenId, version);
+    const nextIndex = 1 - layer.activeIndex;
+    const nextCanvas = layer.canvases[nextIndex];
+    const currentCanvas = layer.canvases[layer.activeIndex];
+
+    drawCoverFit(nextCanvas.getContext("2d"), image, nextCanvas.width, nextCanvas.height);
+    nextCanvas.style.transition = `opacity ${transitionMs}ms linear`;
+    currentCanvas.style.transition = `opacity ${transitionMs}ms linear`;
+    nextCanvas.style.opacity = "1";
+    currentCanvas.style.opacity = "0";
+    layer.activeIndex = nextIndex;
+  }
+
+  async function resync() {
+    for (const screenId of layers.keys()) {
+      try {
+        await applyFrame(screenId, Date.now(), 0);
+      } catch {
+        // No image has been pushed for this screen yet — leave it blank.
+      }
+    }
+  }
+
+  driver.onMessage((message) => {
+    if (message.type === "frame") {
+      applyFrame(message.screen, message.version, message.transition_ms);
+    } else if (message.type === "_connected") {
+      resync();
+    }
+  });
+
+  return { canvases: new Map([...layers].map(([id, layer]) => [id, layer.canvases[layer.activeIndex]])) };
 }
