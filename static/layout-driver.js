@@ -138,6 +138,7 @@ export function enableImageMode(driver) {
       container.element.appendChild(canvas);
     }
     canvasB.style.opacity = "0";
+    canvasA.dataset.layoutDriverActive = "true";
 
     layers.set(screen.id, { canvases: [canvasA, canvasB], activeIndex: 0, pending: Promise.resolve() });
   }
@@ -154,6 +155,8 @@ export function enableImageMode(driver) {
     nextCanvas.style.opacity = "1";
     currentCanvas.style.opacity = "0";
     layer.activeIndex = nextIndex;
+    nextCanvas.dataset.layoutDriverActive = "true";
+    delete currentCanvas.dataset.layoutDriverActive;
   }
 
   async function applyFrame(screenId, version, transitionMs) {
@@ -192,7 +195,10 @@ export function enableImageMode(driver) {
 export function enableScreenshotResponder(driver) {
   function findCanvas(screenId) {
     const container = driver.getScreenContainer(screenId);
-    return container.element.querySelector("canvas");
+    return (
+      container.element.querySelector("canvas[data-layout-driver-active='true']") ??
+      container.element.querySelector("canvas")
+    );
   }
 
   async function composite() {
