@@ -5,6 +5,34 @@
     <title>Layout Driver — Test Pattern</title>
   </head>
   <body>
-    <p>Test pattern app placeholder — populated in Task 9.</p>
+    <script type="module">
+      import { initLayoutDriver } from "/layout-driver.js";
+
+      const COLORS = {
+        F: "#e63946",
+        B: "#2a9d8f",
+        C: "#e9c46a",
+        D: "#264653",
+        A: "#f4a261",
+        E: "#8338ec",
+      };
+
+      const driver = await initLayoutDriver();
+      window.LayoutDriver = driver;
+
+      for (const screen of driver.layoutConfig.screens) {
+        const container = driver.getScreenContainer(screen.id);
+        const canvas = document.createElement("canvas");
+        canvas.width = container.width;
+        canvas.height = container.height;
+        container.element.appendChild(canvas);
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = COLORS[screen.id] ?? "#888888";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "black";
+        ctx.font = "48px sans-serif";
+        ctx.fillText(`${screen.name} (${screen.rect.width}x${screen.rect.height})`, 20, 60);
+      }
+    </script>
   </body>
 </html>
