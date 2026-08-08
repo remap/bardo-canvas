@@ -4,10 +4,14 @@ import asyncio
 import logging
 import threading
 import time
+from pathlib import Path
 
 import httpx
 from playwright.async_api import async_playwright
 
+from layout_server.audio import discover_audio_devices, load_audio_config
+
+from .audio_capture import AudioSender, resolve_input_device
 from .capture_cdp import decode_screencast_frame
 from .config import BroadcasterConfig, load_broadcaster_config
 from .ndi_sender import VideoSender
@@ -74,21 +78,36 @@ async def _capture_loop(
             await browser.close()
 
 
-def run(config_path: str = "config/broadcaster.yaml") -> None:
-    from pathlib import Path
-
+def run(
+    config_path: str = "config/broadcaster.yaml",
+    audio_config_path: str = "config/audio.yaml",
+) -> None:
     config = load_broadcaster_config(Path(config_path))
     wait_for_healthy(
         f"{config.target_url.rstrip('/')}/healthz", timeout_seconds=config.healthz_timeout_seconds
     )
 
     sender = VideoSender(config.ndi_source_name, config.width, config.height, config.fps)
+
+    audio_sender: AudioSender | None = None
+    audio_config = load_audio_config(Path(audio_config_path))
+    input_device = resolve_input_device(audio_config, discover_audio_devices().inputs)
+    if audio_config.enabled and input_device is not None:
+        audio_sender = AudioSender(sender._sender, input_device)
+        audio_sender.start()
+    elif audio_config.enabled:
+        print(
+            f"Audio input device not found: {audio_config.input_device!r} — continuing without audio"
+        )
+
     stop_event = threading.Event()
     try:
         asyncio.run(_capture_loop(config, sender, stop_event))
     except KeyboardInterrupt:
         stop_event.set()
     finally:
+        if audio_sender is not None:
+            audio_sender.stop()
         sender.close()
 
 
