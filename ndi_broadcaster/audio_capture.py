@@ -33,6 +33,7 @@ class AudioSender:
             device=device.index,
             channels=channels,
             samplerate=sample_rate,
+            blocksize=1024,
             callback=self._on_audio,
         )
 
