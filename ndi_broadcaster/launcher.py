@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 
@@ -10,6 +11,8 @@ from playwright.async_api import async_playwright
 from .capture_cdp import decode_screencast_frame
 from .config import BroadcasterConfig, load_broadcaster_config
 from .ndi_sender import VideoSender
+
+logger = logging.getLogger(__name__)
 
 
 class HealthCheckTimeoutError(RuntimeError):
@@ -52,18 +55,23 @@ async def _capture_loop(
         )
 
         def on_frame(params: dict) -> None:
-            frame = decode_screencast_frame(params["data"])
-            sender.send(frame)
-            asyncio.create_task(
-                client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
-            )
+            try:
+                frame = decode_screencast_frame(params["data"])
+                sender.send(frame)
+            except Exception:
+                logger.exception("Failed to decode/send a captured frame; skipping it")
+            finally:
+                asyncio.create_task(
+                    client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+                )
 
         client.on("Page.screencastFrame", on_frame)
 
-        while not stop_event.is_set():
-            await asyncio.sleep(0.1)
-
-        await browser.close()
+        try:
+            while not stop_event.is_set():
+                await asyncio.sleep(0.1)
+        finally:
+            await browser.close()
 
 
 def run(config_path: str = "config/broadcaster.yaml") -> None:
