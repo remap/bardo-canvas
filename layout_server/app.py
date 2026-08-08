@@ -77,9 +77,14 @@ def create_app(
     async def get_audio_devices() -> AudioDeviceList:
         return state.audio_devices
 
-    @app.get("/layout-driver.js")
-    async def get_layout_driver_js() -> FileResponse:
-        return FileResponse(framework_static_dir / "layout-driver.js", media_type="text/javascript")
+    def _framework_js_route(filename: str):
+        async def handler() -> FileResponse:
+            return FileResponse(framework_static_dir / filename, media_type="text/javascript")
+
+        return handler
+
+    for framework_js_filename in ("layout-driver.js", "geometry.js", "device-match.js"):
+        app.get(f"/{framework_js_filename}")(_framework_js_route(framework_js_filename))
 
     app.mount("/", StaticFiles(directory=app_static_dir, html=True), name="app")
 

@@ -33,3 +33,21 @@ def test_get_audio_devices_populated_by_lifespan(client, tmp_path, monkeypatch):
 def test_audio_devices_file_written_on_startup(client, tmp_path):
     devices_file = tmp_path / "runtime" / "audio_devices.json"
     assert devices_file.exists()
+
+
+def test_get_layout_driver_js(client):
+    response = client.get("/layout-driver.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+
+def test_get_geometry_js(client):
+    response = client.get("/geometry.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+
+def test_get_device_match_js(client):
+    response = client.get("/device-match.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
