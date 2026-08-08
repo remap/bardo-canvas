@@ -83,13 +83,48 @@ Serves the active app's static bundle plus the shared framework assets, and brok
 - Convenience API for push-driven apps: `LayoutDriver.enableImageMode()` creates a `<canvas>` inside each container, opens the `/ws` connection, and on each `frame` message fetches `/screens/{id}/image?v={version}` and draws it into that screen's canvas with a cover-fit crop (like CSS `object-fit: cover` — scale to fill, crop the overflow, keep aspect) and a crossfade over `transition_ms`. This is what makes "generate roughly-screen-shaped images and push them" require zero cropping math in the app itself.
 - Apps that only need direct rendering (e.g. the p5 sketches) never call `enableImageMode()` and just use `getScreenContainer`.
 
-### 3.3 `ndi_broadcaster` (generalized from `karaoke-test`)
+### 3.3 Audio: browser output → OS loopback → broadcaster input → NDI
+
+Audio is a first-class, if optional, path — not an afterthought bolted on later. The shape is exactly karaoke-test's original loopback pattern, generalized:
+
+1. An app that wants sound plays it through a normal `<audio>`/`<video>` element or a Web Audio `AudioContext` in the browser.
+2. That element/context is routed to a loopback *output* device (e.g. "BlackHole 2ch") via `setSinkId()`, instead of the real speakers.
+3. The OS loopback driver exposes that same device as an *input*; `ndi_broadcaster` captures it with `sounddevice.InputStream` and feeds `cyndilib`'s `AudioSendFrame`, on its own thread (same threading shape karaoke-test already used — this is a re-enable, not a new design).
+4. The result is muxed into the single outgoing NDI stream alongside the video.
+
+**Device naming, not indices, everywhere** — PortAudio/CoreAudio device indices shift across reboots and (dis)connects, so both sides of the config refer to devices by (substring-matched, case-insensitive) *name*, resolved to an index/deviceId at runtime, same pattern as karaoke-test's `audio_device` config key.
+
+**Discovery file, written fresh on every `layout_server` startup**: a FastAPI lifespan hook runs `sounddevice.query_devices()` and writes `runtime/audio_devices.json`:
+
+```json
+{
+  "inputs":  [{"index": 2, "name": "BlackHole 2ch", "max_input_channels": 2}],
+  "outputs": [{"index": 2, "name": "BlackHole 2ch", "max_output_channels": 2},
+              {"index": 4, "name": "MacBook Pro Speakers", "max_output_channels": 2}]
+}
+```
+
+Also served at `GET /api/audio-devices`, so the file (for a human editing config) and the API (for tooling/debugging) always agree, and neither goes stale relative to what's actually plugged in.
+
+**Config**: `config/audio.yaml`, one shared file since both sides of the loopback are usually the same physical virtual device, but kept as two independent keys for setups that don't loop back symmetrically:
+
+```yaml
+enabled: true
+input_device: "BlackHole 2ch"   # broadcaster's sounddevice.InputStream match
+output_device: "BlackHole 2ch"  # browser setSinkId() match
+```
+
+`layout_server` exposes this (minus nothing sensitive — there's no secret here) at `GET /api/audio-config`. `layout-driver.js` provides `LayoutDriver.routeAudioElement(el)`: fetches that config, resolves `output_device` against the browser's own `navigator.mediaDevices.enumerateDevices()` (substring match), and calls `el.setSinkId(deviceId)`. Apps that want sound just build a normal media element and pass it to this helper; apps that don't want sound never call it. Chrome only returns real device *labels* from `enumerateDevices()` once some media permission has been granted, so the broadcaster's Playwright launch grants microphone permission on the context up front (`context.grant_permissions(["microphone"])`) — harmless on a trusted local kiosk, and required for `output_device` name matching to work at all.
+
+If `audio.yaml` has `enabled: false`, or a configured device name isn't found in the discovery list, the affected side logs a warning and runs without audio rather than failing the whole app/broadcaster.
+
+### 3.4 `ndi_broadcaster` (generalized from `karaoke-test`)
 
 - Playwright drives headed Chrome in kiosk fullscreen against the layout-server's URL (default `https://localhost:8443/`), after polling `/healthz`.
 - Capture backend is config-selectable (`config/broadcaster.yaml: capture_backend: cdp | sck`), default `cdp`:
   - `cdp`: Chrome DevTools Protocol screencast (`Page.startScreencast`), JPEG-decoded via Pillow. No OS permissions, works on any platform Playwright supports.
   - `sck`: macOS ScreenCaptureKit via PyObjC, raw BGRA frames matched by window title. Needs Screen Recording permission and a headed display (physical or dummy plug) attached. Opt-in for deployments that need the extra performance/quality at sustained 4K30.
-- Sends via `cyndilib` (`cyndilib.sender.Sender`, `FourCC.RGBA`), fixed 3840×2160 @ 30fps, on a dedicated capture/send thread. Audio support (present in karaoke-test) is dropped from the default path — not needed for this project — but the sender setup keeps the same threading shape so it's a small add-back later if a future app needs it.
+- Sends via `cyndilib` (`cyndilib.sender.Sender`, `FourCC.RGBA`), fixed 3840×2160 @ 30fps, on a dedicated capture/send thread, plus the loopback-captured `AudioSendFrame` thread described in §3.3 when `audio.yaml` has `enabled: true`.
 - Karaoke-specific logic (Spotify DRM/headed-browser requirement, the karaoke backend proxy chain, hardcoded `"Karaoke-Test"` NDI source name, `1920x1080` baked-in viewport) is stripped; NDI source name, target URL, resolution, and fps all become config/env.
 
 ## 4. Data flow examples
@@ -97,6 +132,8 @@ Serves the active app's static bundle plus the shared framework assets, and brok
 **Push-driven (Flux app shape):** worker generates an image sized close to a screen's aspect → `POST /screens/E/image` → server stores bytes + bumps version + broadcasts over `/ws` → browser fetches the new bytes and cover-fit-crops them into screen E's canvas → next captured frame includes it. The app never computes an exact crop rect itself.
 
 **Direct-render (p5 app shape):** on page load, the app's JS asks `LayoutDriver.getScreenContainer('F')` for each screen id, constructs a `new p5(sketchForF, containerF.element)` per screen (six independent p5 instances, each only aware of its own container's `width`/`height`), and each sketch runs its own `draw()` loop. The layout-server and `/ws` channel are irrelevant to this app — it never pushes images.
+
+**Audio (either app shape, opt-in):** app creates an `<audio>` element and calls `LayoutDriver.routeAudioElement(el)` → element's sink is set to the configured loopback output device → OS loopback presents the same audio as an input device → `ndi_broadcaster`'s `InputStream` captures it → muxed into the NDI stream as its audio channel.
 
 ## 5. Repo structure
 
@@ -107,6 +144,8 @@ layout-driver/
   ndi_broadcaster/        # generalized capture+broadcast, launcher, config
   config/screens.yaml
   config/broadcaster.yaml
+  config/audio.yaml
+  runtime/audio_devices.json   # regenerated on every layout_server startup, not committed
   apps/
     test-pattern/         # zero-dependency static bundle: labeled solid-color rects per screen,
                            # used to smoke-test the whole pipeline before either real app exists
@@ -122,16 +161,28 @@ layout-driver/
 - WebSocket drop → client auto-reconnects with backoff; on reconnect, re-fetches every screen's latest image to resync (covers missed pushes).
 - Broadcaster launcher polls `/healthz` with a timeout before touching Chrome/Playwright; fails loudly (non-zero exit, clear log line) rather than launching against a dead server.
 - Config validation (overlapping screen rects, unknown module_size, etc.) fails fast at server startup, not at first request.
+- A configured audio device name (input or output) not found in the discovery list logs a warning and disables audio for that side rather than crashing the server, broadcaster, or app.
 
 ## 7. Testing
 
 - `pytest` unit tests for `screens.yaml` loading and rect computation, using the exact fixture table in §2 as expected output, plus an overlap-rejection test.
 - A small JS unit test (or plain Node script run in CI) for the cover-fit crop math, covering the three aspect ratios actually present (9:7, 2:1, 4:1).
+- A `pytest` unit test for the device-name-matching function (exact match, case-insensitive substring match, not-found → `None`/fallback), run against a fixture device list — no real audio hardware needed.
 - Manual pipeline smoke test using `apps/test-pattern/`: run `run.sh`, confirm each screen shows its correctly-positioned/sized labeled rectangle in the captured NDI output before either real app is built. NDI/capture correctness beyond that is verified manually (no practical way to unit test actual OS-level screen capture or NDI output).
 
 ## 8. Explicit non-goals
 
 - No auth on the HTTP/WS API (trusted LAN assumption).
 - No support for two apps driving different screens simultaneously.
-- No audio in the NDI stream by default.
+- No audio mixing/ducking across multiple simultaneous sources — one loopback input is captured as-is; an app that wants to mix multiple sounds does so itself (e.g. multiple `<audio>` elements or a Web Audio graph) before it reaches the loopback output.
 - No direct control of the physical LED wall — this system's output is the NDI stream only.
+
+## 9. Tech stack
+
+Chosen to keep the implementation small and readable, favoring current, actively-maintained tooling over legacy defaults:
+
+- **Python 3.13**, managed with `uv` (dependency resolution + venv + running — replaces pip/venv/poetry with one fast tool). Modern typing throughout: PEP 695 generic/type-alias syntax (`type ScreenId = str`) where it helps, `dataclasses`/Pydantic v2 models for config (not raw dicts), structural `match`/`case` for the small WS-message-type dispatch. FastAPI's `lifespan` context manager for startup/shutdown (device discovery, cert bootstrap check) rather than the deprecated `on_event` hooks.
+- **`ruff`** for lint + format (single fast tool, replaces flake8+black+isort); a type checker (`pyright` or `mypy`) run in CI.
+- **`sounddevice`** for audio device enumeration/capture (same library karaoke-test already uses — proven for this exact job), **`cyndilib`** for NDI send, **Pillow** for image decode/validate, **Playwright** for browser automation.
+- **JavaScript**: no bundler/build step — native ES modules (`<script type="module">`), `fetch`, `WebSocket`, `structuredClone`; kept dependency-free except **p5.js** (current major version, ESM import, instance mode) for the generative sample app. Avoiding build tooling here is itself the "keep it simple" choice for a small kiosk page, not a gap.
+- **YAML** (via `PyYAML`) for all config files, matching the existing gentree/karaoke-test convention.
