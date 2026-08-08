@@ -2,3 +2,5 @@
 .DS_Store
 .venv/
 runtime/
+__pycache__/
+*.pyc
