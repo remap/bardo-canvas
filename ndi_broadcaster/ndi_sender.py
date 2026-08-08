@@ -19,7 +19,7 @@ class VideoSender:
         self._sender.open()
 
     def send(self, frame: np.ndarray) -> None:
-        self._video_frame.write_data(frame.tobytes())
+        self._video_frame.write_data(np.ascontiguousarray(frame).reshape(-1))
         self._sender.send_video_async()
 
     def close(self) -> None:
