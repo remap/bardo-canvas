@@ -138,14 +138,10 @@ export function enableImageMode(driver) {
     }
     canvasB.style.opacity = "0";
 
-    layers.set(screen.id, { canvases: [canvasA, canvasB], activeIndex: 0 });
+    layers.set(screen.id, { canvases: [canvasA, canvasB], activeIndex: 0, pending: Promise.resolve() });
   }
 
-  async function applyFrame(screenId, version, transitionMs) {
-    const layer = layers.get(screenId);
-    if (!layer) {
-      return;
-    }
+  async function runApplyFrame(layer, screenId, version, transitionMs) {
     const image = await loadScreenImage(screenId, version);
     const nextIndex = 1 - layer.activeIndex;
     const nextCanvas = layer.canvases[nextIndex];
@@ -157,6 +153,18 @@ export function enableImageMode(driver) {
     nextCanvas.style.opacity = "1";
     currentCanvas.style.opacity = "0";
     layer.activeIndex = nextIndex;
+  }
+
+  async function applyFrame(screenId, version, transitionMs) {
+    const layer = layers.get(screenId);
+    if (!layer) {
+      return;
+    }
+    const current = layer.pending
+      .catch(() => {})
+      .then(() => runApplyFrame(layer, screenId, version, transitionMs));
+    layer.pending = current;
+    return current;
   }
 
   async function resync() {
