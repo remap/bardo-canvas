@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import sounddevice as sd
 from cyndilib.audio_frame import AudioSendFrame
 from cyndilib.sender import Sender
 
 from layout_server.audio import AudioConfig, AudioDevice, match_device_by_name
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_input_device(config: AudioConfig, devices: list[AudioDevice]) -> AudioDevice | None:
@@ -41,9 +45,12 @@ class AudioSender:
         # sounddevice delivers (num_samples, num_channels) float32; cyndilib's
         # AudioSendFrame.write_data expects a 2-d float32 array/memoryview shaped
         # (num_channels, num_samples), not raw bytes.
-        data = np.ascontiguousarray(indata.T, dtype=np.float32)
-        self._audio_frame.write_data(data)
-        self._sender.send_audio()
+        try:
+            data = np.ascontiguousarray(indata.T, dtype=np.float32)
+            self._audio_frame.write_data(data)
+            self._sender.send_audio()
+        except Exception:
+            logger.exception("Failed to write/send an audio block; skipping it")
 
     def start(self) -> None:
         self._stream.start()

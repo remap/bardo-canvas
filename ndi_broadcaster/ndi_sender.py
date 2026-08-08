@@ -33,6 +33,10 @@ class VideoSender:
     def sender(self) -> Sender:
         return self._sender
 
+    @property
+    def is_open(self) -> bool:
+        return self._sender._running
+
     def open(self) -> None:
         self._sender.open()
 

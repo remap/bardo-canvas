@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -173,9 +174,23 @@ def run(
     audio_sender: AudioSender | None = None
     try:
         if will_attach_audio:
-            audio_sender = AudioSender(sender.sender, input_device)
-            sender.open()
-            audio_sender.start()
+            try:
+                audio_sender = AudioSender(sender.sender, input_device)
+                sender.open()
+                audio_sender.start()
+            except Exception:
+                # A busy device, an unsupported sample rate, etc. must not take the
+                # video stream down with it — degrade to video-only.
+                logger.exception(
+                    "Failed to start audio capture (%s); continuing with video only",
+                    audio_config.input_device,
+                )
+                if audio_sender is not None:
+                    with contextlib.suppress(Exception):
+                        audio_sender.stop()
+                    audio_sender = None
+                if not sender.is_open:
+                    sender.open()
         elif audio_config.enabled:
             print(
                 f"Audio input device not found: {audio_config.input_device!r} — continuing without audio"
