@@ -1,0 +1,7 @@
+target_url: "https://localhost:8443/"
+capture_backend: "cdp"
+ndi_source_name: "Layout Driver"
+width: 3840
+height: 2160
+fps: 30
+healthz_timeout_seconds: 30.0
