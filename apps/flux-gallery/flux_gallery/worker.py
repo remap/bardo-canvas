@@ -107,6 +107,9 @@ def run_forever() -> None:
             image_bytes = generator.generate(prompt, width, height)
         except Exception:
             logger.exception("Flux generation failed for screen %s; skipping cycle", screen_id)
+            # Without a pause, a persistently failing generator (e.g. a dead MPS
+            # context) spins this loop as fast as it can log tracebacks.
+            time.sleep(1)
             continue
 
         try:
