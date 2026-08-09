@@ -1,4 +1,5 @@
 .superpowers/
+.claude/
 .DS_Store
 .venv/
 runtime/

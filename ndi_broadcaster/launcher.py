@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
@@ -121,6 +122,9 @@ def _chrome_launch_args() -> list[str]:
     return ["--kiosk", "--autoplay-policy=no-user-gesture-required"]
 
 
+SCREENSHOT_POLL_INTERVAL_SECONDS = 1.0
+
+
 async def _capture_loop(
     config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
 ) -> None:
@@ -134,23 +138,7 @@ async def _capture_loop(
         page = await context.new_page()
         await page.goto(config.target_url)
 
-        client = await context.new_cdp_session(page)
-        await client.send(
-            "Page.startScreencast",
-            {"format": "jpeg", "quality": 80, "maxWidth": config.width, "maxHeight": config.height},
-        )
-
         frame_slot = _LatestFrameSlot()
-
-        def on_frame(params: dict) -> None:
-            # Decoding and sending happen on the sender thread; the event loop only
-            # stashes the raw payload and acks, so it is never starved by capture work.
-            frame_slot.put(params["data"])
-            asyncio.create_task(
-                client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
-            )
-
-        client.on("Page.screencastFrame", on_frame)
 
         sender_thread = threading.Thread(
             target=_sender_thread_loop,
@@ -159,9 +147,29 @@ async def _capture_loop(
         )
         sender_thread.start()
 
+        # The visible kiosk window's CSS layout (buildRoot()'s absolute-positioned
+        # containers under a transform: scale() root, sized to fit whatever the real
+        # window/viewport happens to be) is a completely separate layout computation
+        # from /api/screenshot's compositor (computeCompositePlacements(), drawing
+        # straight onto a fixed 3840x2160 offscreen canvas). They only agree when the
+        # real viewport's aspect ratio exactly matches the canvas's -- on a display
+        # that doesn't (observed live: a 3456x2234 laptop screen against a 3840x2160
+        # canvas), the CSS-scaled/letterboxed window content, once stretched back up
+        # to the configured capture resolution, comes out with screens misplaced and
+        # wrongly sized. Rather than capturing that CSS-dependent rendering, pull
+        # frames from the same compositor /api/screenshot already uses -- same engine,
+        # a second output -- so there is only one source of truth for screen layout.
+        screenshot_url = f"{config.target_url.rstrip('/')}/api/screenshot"
         try:
-            while not stop_event.is_set():
-                await asyncio.sleep(0.1)
+            async with httpx.AsyncClient(verify=False, timeout=5.0) as http_client:
+                while not stop_event.is_set():
+                    try:
+                        response = await http_client.post(screenshot_url)
+                        response.raise_for_status()
+                        frame_slot.put(base64.b64encode(response.content).decode("ascii"))
+                    except Exception:
+                        logger.exception("Failed to pull a wall screenshot for NDI; will retry")
+                    await asyncio.sleep(SCREENSHOT_POLL_INTERVAL_SECONDS)
         finally:
             stop_event.set()
             try:
@@ -235,4 +243,7 @@ def run(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     run()
