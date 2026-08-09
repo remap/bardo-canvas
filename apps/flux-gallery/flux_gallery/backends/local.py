@@ -14,7 +14,7 @@ def _resolve_device() -> str:
     return "cpu"
 
 
-class FluxGenerator:
+class LocalBackend:
     def __init__(self, model: str, num_inference_steps: int) -> None:
         self._num_inference_steps = num_inference_steps
         self._device = _resolve_device()

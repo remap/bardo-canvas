@@ -11,9 +11,9 @@ import httpx
 
 from layout_server.config import LayoutConfig, load_layout_config
 
+from .backends.local import LocalBackend
 from .config import PromptsConfig, load_prompts_config
 from .disk_history import save_and_prune
-from .flux_generator import FluxGenerator
 from .gemini_expander import GeminiExpander
 from .layout_driver_client import push_image, take_screenshot
 from .prompt_queue import PromptQueue
@@ -77,7 +77,7 @@ def run_forever() -> None:
     _validate_screen_ids(prompts_config, layout_config)
 
     expander = GeminiExpander(api_key=gemini_api_key, model=prompts_config.base.gemini_model)
-    generator = FluxGenerator(
+    generator = LocalBackend(
         model=prompts_config.base.model,
         num_inference_steps=prompts_config.base.num_inference_steps,
     )
