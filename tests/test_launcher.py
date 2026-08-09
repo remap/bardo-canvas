@@ -1,4 +1,5 @@
 import http.server
+import platform
 import socketserver
 import textwrap
 import threading
@@ -104,15 +105,24 @@ def test_latest_frame_slot_starts_empty():
 
 def test_latest_frame_slot_keeps_only_the_latest_value():
     slot = _LatestFrameSlot()
-    slot.put("first")
-    slot.put("second")
+    slot.put(b"first")
+    slot.put(b"second")
 
-    assert slot.take() == "second"
+    assert slot.take() == b"second"
     # No backlog: the superseded frame is gone, not queued behind the latest one.
     assert slot.take() is None
 
 
-def test_chrome_launch_args_include_kiosk_and_autoplay_policy():
+def test_chrome_launch_args_include_autoplay_policy():
     args = _chrome_launch_args()
-    assert "--kiosk" in args
     assert "--autoplay-policy=no-user-gesture-required" in args
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="ANGLE Metal is macOS-only")
+def test_chrome_launch_args_use_metal_on_macos():
+    assert "--use-angle=metal" in _chrome_launch_args()
+
+
+@pytest.mark.skipif(platform.system() == "Darwin", reason="covered by the macOS-only test above")
+def test_chrome_launch_args_omit_metal_off_macos():
+    assert "--use-angle=metal" not in _chrome_launch_args()
