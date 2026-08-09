@@ -1,6 +1,8 @@
 base:
-  model: "black-forest-labs/FLUX.1-schnell"
+  model: "black-forest-labs/FLUX.1-schnell"   # local backend only
   gemini_model: "gemini-flash-latest"
+  backend: "local"                             # "local" | "fal"
+  fal_endpoint: "fal-ai/flux/schnell"           # fal backend only
   num_inference_steps: 4
   queue_size: 5
   refill_when_below: 2

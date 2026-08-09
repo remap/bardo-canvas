@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel
@@ -12,6 +13,8 @@ class BaseGenerationConfig(BaseModel):
     num_inference_steps: int = 4
     queue_size: int = 5
     refill_when_below: int = 2
+    backend: Literal["local", "fal"] = "local"
+    fal_endpoint: str = "fal-ai/flux/schnell"
 
 
 class ScreenPromptConfig(BaseModel):

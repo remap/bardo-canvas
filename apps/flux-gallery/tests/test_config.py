@@ -23,6 +23,12 @@ def test_base_config_defaults_match_prompts_yaml():
     assert config.base.refill_when_below == 2
 
 
+def test_base_config_backend_defaults_match_prompts_yaml():
+    config = load_prompts_config(PROMPTS_YAML)
+    assert config.base.backend == "local"
+    assert config.base.fal_endpoint == "fal-ai/flux/schnell"
+
+
 def test_screen_by_id_returns_none_for_unknown_id():
     config = load_prompts_config(PROMPTS_YAML)
     assert config.screen_by_id("Z") is None
