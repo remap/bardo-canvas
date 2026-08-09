@@ -24,3 +24,15 @@ def test_save_and_prune_does_not_prune_when_under_the_limit(tmp_path):
 
     remaining = sorted(p.name for p in directory.iterdir())
     assert remaining == ["a.png", "b.png"]
+
+
+def test_save_and_prune_ignores_subdirectories(tmp_path):
+    directory = tmp_path / "screen-f"
+    directory.mkdir()
+    (directory / "aa-subdir").mkdir()  # sorts first, so it would be the prune candidate
+    save_and_prune(directory, "b.png", b"1", keep=1)
+    save_and_prune(directory, "c.png", b"2", keep=1)
+
+    # The subdirectory survives untouched and never counts toward the retention limit.
+    assert (directory / "aa-subdir").is_dir()
+    assert sorted(p.name for p in directory.iterdir() if p.is_file()) == ["c.png"]

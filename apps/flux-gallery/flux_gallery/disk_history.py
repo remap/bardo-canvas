@@ -8,7 +8,8 @@ def save_and_prune(directory: Path, filename: str, data: bytes, keep: int) -> Pa
     file_path = directory / filename
     file_path.write_bytes(data)
 
-    existing = sorted(directory.iterdir())
+    # Files only: a stray subdirectory would otherwise make unlink() raise.
+    existing = sorted(p for p in directory.iterdir() if p.is_file())
     if len(existing) > keep:
         for stale in existing[: len(existing) - keep]:
             stale.unlink()
