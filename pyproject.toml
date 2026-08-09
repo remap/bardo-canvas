@@ -39,6 +39,9 @@ addopts = "--import-mode=importlib"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# docs/ holds the historical specs and plans; ruff format would otherwise rewrite the
+# Python samples embedded in that record every time it runs over the whole repo.
+extend-exclude = ["docs/"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["layout_server"]
