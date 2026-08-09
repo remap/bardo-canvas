@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Noraebang Generative Wall</title>
+    <script src="/vendor/p5.min.js"></script>
+  </head>
+  <body>
+    <script type="module">
+      import { initLayoutDriver, routeAudioElement } from "/layout-driver.js";
+      import { validateSketchAssignments, sketchModulePath } from "/sketch-loader.js";
+
+      const driver = await initLayoutDriver();
+      window.LayoutDriver = driver;
+
+      const configResponse = await fetch("/config/noraebang.json");
+      const config = await configResponse.json();
+      const screens = validateSketchAssignments(config);
+
+      for (const screen of screens) {
+        try {
+          const container = driver.getScreenContainer(screen.id);
+          const module = await import(sketchModulePath(screen.sketch));
+          const sketchFn = module.createSketch(container.width, container.height);
+          new p5(sketchFn, container.element);
+        } catch (error) {
+          console.error(`Sketch "${screen.sketch}" failed to load for screen "${screen.id}"`, error);
+        }
+      }
+
+      const audio = document.createElement("audio");
+      audio.src = "/assets/track.mp3";
+      audio.loop = true;
+      audio.autoplay = true;
+      document.body.appendChild(audio);
+      routeAudioElement(audio);
+    </script>
+  </body>
+</html>
