@@ -11,8 +11,8 @@ import httpx
 
 from layout_server.config import LayoutConfig, load_layout_config
 
-from .backends.local import LocalBackend
-from .config import PromptsConfig, load_prompts_config
+from .backend_registry import create_backend
+from .config import BaseGenerationConfig, PromptsConfig, load_prompts_config
 from .disk_history import save_and_prune
 from .gemini_expander import GeminiExpander
 from .layout_driver_client import push_image, take_screenshot
@@ -66,6 +66,21 @@ def _validate_screen_ids(prompts_config: PromptsConfig, layout_config: LayoutCon
             )
 
 
+def _resolve_backend_name(env: dict[str, str], base_config: BaseGenerationConfig) -> str:
+    return env.get("FLUX_BACKEND") or base_config.backend
+
+
+def _validate_backend_selection(backend_name: str, env: dict[str, str]) -> None:
+    """Fail at boot on a fal backend selection with no FAL_KEY set.
+
+    Without this, a missing key only surfaces as a FalBackend.generate()
+    exception buried inside the worker's per-cycle catch-all on the first
+    iteration.
+    """
+    if backend_name == "fal" and "FAL_KEY" not in env:
+        raise ValueError("backend 'fal' is selected but FAL_KEY is not set in the environment")
+
+
 def run_forever() -> None:
     screens_yaml = Path(os.environ.get("SCREENS_YAML", str(REPO_ROOT / "config" / "screens.yaml")))
     prompts_yaml = Path(os.environ.get("PROMPTS_YAML", str(APP_ROOT / "config" / "prompts.yaml")))
@@ -76,11 +91,12 @@ def run_forever() -> None:
     prompts_config = load_prompts_config(prompts_yaml)
     _validate_screen_ids(prompts_config, layout_config)
 
+    env = dict(os.environ)
+    backend_name = _resolve_backend_name(env, prompts_config.base)
+    _validate_backend_selection(backend_name, env)
+
     expander = GeminiExpander(api_key=gemini_api_key, model=prompts_config.base.gemini_model)
-    generator = LocalBackend(
-        model=prompts_config.base.model,
-        num_inference_steps=prompts_config.base.num_inference_steps,
-    )
+    generator = create_backend(backend_name, prompts_config.base)
     http_client = httpx.Client(base_url=layout_driver_url, verify=False, timeout=30.0)
 
     queues = {

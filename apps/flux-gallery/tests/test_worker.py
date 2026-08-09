@@ -6,8 +6,13 @@ import pytest
 # installed this file would fail at collection with a raw ModuleNotFoundError.
 pytest.importorskip("torch")
 
-from flux_gallery.config import PromptsConfig, ScreenPromptConfig
-from flux_gallery.worker import _validate_screen_ids, push_with_retry
+from flux_gallery.config import BaseGenerationConfig, PromptsConfig, ScreenPromptConfig
+from flux_gallery.worker import (
+    _resolve_backend_name,
+    _validate_backend_selection,
+    _validate_screen_ids,
+    push_with_retry,
+)
 
 from layout_server.config import (
     CanvasConfig,
@@ -101,3 +106,28 @@ def test_validate_screen_ids_rejects_an_id_missing_from_the_layout():
 
     # The message names the ids the operator can actually choose from.
     assert "['B', 'F']" in str(excinfo.value)
+
+
+def test_resolve_backend_name_uses_flux_backend_env_override():
+    base_config = BaseGenerationConfig(backend="local")
+
+    assert _resolve_backend_name({"FLUX_BACKEND": "fal"}, base_config) == "fal"
+
+
+def test_resolve_backend_name_falls_through_to_config_when_env_unset():
+    base_config = BaseGenerationConfig(backend="fal")
+
+    assert _resolve_backend_name({}, base_config) == "fal"
+
+
+def test_validate_backend_selection_accepts_local_without_fal_key():
+    _validate_backend_selection("local", {})  # must not raise
+
+
+def test_validate_backend_selection_accepts_fal_with_fal_key_set():
+    _validate_backend_selection("fal", {"FAL_KEY": "secret"})  # must not raise
+
+
+def test_validate_backend_selection_rejects_fal_without_fal_key():
+    with pytest.raises(ValueError, match="FAL_KEY"):
+        _validate_backend_selection("fal", {})
