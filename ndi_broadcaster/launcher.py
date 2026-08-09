@@ -202,72 +202,70 @@ async def _capture_loop(
         )
         sender_thread.start()
 
-        # page.screenshot() polling was tried here first (simpler, and correct for the
-        # aspect-ratio bug that made us drop CDP screencast originally -- see git log).
-        # It works, but a live extended run showed capture latency climbing steadily
-        # over minutes of sustained 30fps polling (30ms -> 200ms+) despite stable
-        # decode/send costs and no memory growth in any process -- Chromium's
-        # Page.captureScreenshot is built for occasional one-off snapshots, not
-        # sustained continuous capture, and something about repeated calls at video
-        # rates accumulates internal cost over time. Page.startScreencast is Chromium's
-        # actual purpose-built API for continuous, video-like capture: push-based (a
-        # frame only arrives on real compositor damage, not on our polling schedule)
-        # and used exactly this way by the karaoke-test project this framework
-        # generalizes from. The reason it was dropped here originally -- headed mode's
-        # real OS window being capped smaller than the configured resolution by the
-        # physical display, producing a wrong-aspect-ratio capture -- doesn't apply
-        # under headless: there is no physical window to be smaller than anything.
-        client = await context.new_cdp_session(page)
-        await client.send(
-            "Page.startScreencast",
-            {
-                "format": "jpeg",
-                "quality": 85,
-                "maxWidth": config.width,
-                "maxHeight": config.height,
-            },
-        )
+        # Every CDP screenshot/screencast API tried here -- Page.captureScreenshot
+        # (clipped to #layout-driver-root, and over the whole viewport),
+        # Page.startScreencast, HeadlessExperimental.beginFrame (removed in this
+        # Chromium version's full-browser binary; hangs indefinitely via the
+        # headless-shell binary) -- was independently confirmed live to return solid
+        # black for canvases that unambiguously have real content: a canvas's own
+        # ctx.getImageData() showed correct pixels (a pushed solid-color test image) at
+        # the exact coordinates a same-instant CDP screenshot showed (0, 0, 0),
+        # reproduced with and without GPU acceleration and across both Chromium
+        # binaries Playwright can select. This matches a long-documented class of
+        # Chromium/Puppeteer/Playwright bug (e.g. puppeteer/puppeteer#5352): canvas
+        # content that's valid and readable from the page's own JS does not reliably
+        # reach Chromium's own viewport-level screenshot/screencast capture pipeline.
+        #
+        # window.__ndiCaptureDataURL() (static/layout-driver.js) sidesteps every CDP
+        # screenshot API entirely: it composites the same canvases with plain
+        # ctx.drawImage() and reads the result back with the *canvas's own*
+        # toDataURL() -- proven reliable throughout that investigation, for both this
+        # app's fetch-and-draw-once canvases and noraebang's continuously-animating
+        # ones. page.evaluate() runs this over the same CDP connection Playwright
+        # already holds to drive this browser -- there is no HTTP server, no network
+        # round trip, and no second browser tab involved; it's a direct call into the
+        # one page this loop already controls, the same mechanism Playwright uses for
+        # every other page.evaluate() call in this codebase and its tests.
+        frame_interval = 1.0 / config.fps
+        next_deadline = time.monotonic()
 
-        # asyncio.create_task() only holds a weak reference to the task it schedules;
-        # with nothing else referencing it, the task can be garbage-collected before
-        # the ack is actually sent. CDP's screencast is flow-controlled -- it withholds
-        # the next frame until the current one is acked -- so a dropped ack eventually
-        # stalls the whole capture pipeline. Keeping a strong reference until each ack
-        # task completes prevents that (this exact bug, and this exact fix, previously
-        # shipped and reverted with this capture mechanism -- see git log).
-        pending_acks: set[asyncio.Task] = set()
-
-        # Frames arrive by event, not on our schedule -- this is a rate/liveness
-        # check ("did screencast keep delivering frames"), not a latency measurement
-        # the way the old polling approach's was.
-        frames_since_log = 0
-        last_frame_log = time.monotonic()
-
-        def on_frame(params: dict) -> None:
-            nonlocal frames_since_log, last_frame_log
-            frame_slot.put(base64.b64decode(params["data"]))
-            task = asyncio.create_task(
-                client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
-            )
-            pending_acks.add(task)
-            task.add_done_callback(pending_acks.discard)
-
-            frames_since_log += 1
-            now = time.monotonic()
-            if now - last_frame_log >= 5.0:
-                logger.info(
-                    "NDI capture: %.1f frames/sec delivered by screencast in the last %.1fs",
-                    frames_since_log / (now - last_frame_log),
-                    now - last_frame_log,
-                )
-                frames_since_log = 0
-                last_frame_log = now
-
-        client.on("Page.screencastFrame", on_frame)
+        captures_since_log = 0
+        capture_seconds_since_log = 0.0
+        last_fps_log = time.monotonic()
 
         try:
             while not stop_event.is_set():
-                await asyncio.sleep(0.5)
+                capture_start = time.monotonic()
+                try:
+                    data_url = await page.evaluate(
+                        "window.__ndiCaptureDataURL && window.__ndiCaptureDataURL()"
+                    )
+                    if data_url:
+                        _, _, b64_data = data_url.partition(",")
+                        frame_slot.put(base64.b64decode(b64_data))
+                except Exception:
+                    logger.exception("Failed to capture the wall for NDI; will retry")
+
+                captures_since_log += 1
+                capture_seconds_since_log += time.monotonic() - capture_start
+                now = time.monotonic()
+                if now - last_fps_log >= 5.0:
+                    logger.info(
+                        "NDI capture: %.1f fps achieved (target %d), %.1fms avg capture latency",
+                        captures_since_log / (now - last_fps_log),
+                        config.fps,
+                        (capture_seconds_since_log / captures_since_log) * 1000,
+                    )
+                    captures_since_log = 0
+                    capture_seconds_since_log = 0.0
+                    last_fps_log = now
+
+                next_deadline += frame_interval
+                remaining = next_deadline - time.monotonic()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                else:
+                    next_deadline = time.monotonic()
         finally:
             stop_event.set()
             try:

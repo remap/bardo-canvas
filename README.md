@@ -105,17 +105,26 @@ Disk usage: the worker retains the most recent 200 images per screen plus 200 fu
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`
 (gitignored).
 
-## Performance: GPU acceleration on macOS
+## Performance and correctness: how NDI capture actually works
 
-Playwright's bundled headless Chromium defaults to the SwiftShader *software* renderer —
-confirmed live via CDP's `SystemInfo.getInfo`, every canvas draw and every wall capture
-was being rasterized entirely on the CPU, producing an inconsistent, well-below-target
-capture rate (observed: oscillating 12–28fps against a 30fps target) that reads as choppy
-on the NDI feed. On macOS, `_chrome_launch_args()` (`ndi_broadcaster/launcher.py`) adds
-`--use-angle=metal`, switching Chromium to the real GPU via Apple's Metal API — confirmed
-live to bring capture to a steady ~28–30fps. This flag is macOS-only (ANGLE's Metal
-backend doesn't exist elsewhere); other platforms get Chromium's own default backend
-selection rather than a blindly-guessed flag.
+The broadcaster does **not** use any Chrome DevTools Protocol screenshot API
+(`Page.captureScreenshot`, `Page.startScreencast`) to read the wall's content — every one
+of those was tried and independently found, via live testing, to unreliably return solid
+black for this app's canvases despite them holding correct, verified pixel data. This
+matches a known class of Chromium bug (canvas content valid and readable from the page's
+own JS not reliably reaching Chromium's viewport-level capture pipeline). Instead,
+`static/layout-driver.js` exposes `window.__ndiCaptureDataURL()`, which composites the
+wall with plain `ctx.drawImage()`/`canvas.toDataURL()` — the same reliable, in-page
+approach `/api/screenshot` already used — and the broadcaster calls it directly via
+Playwright's `page.evaluate()`, over the same CDP connection already driving the browser.
+No HTTP server, no network round trip, no second browser tab. See framework spec §3.4 for
+the full history of what was tried and why each attempt was abandoned.
+
+On macOS, `_chrome_launch_args()` (`ndi_broadcaster/launcher.py`) adds `--use-angle=metal`:
+Playwright's bundled headless Chromium otherwise defaults to the SwiftShader *software*
+renderer (confirmed live via CDP's `SystemInfo.getInfo`), rasterizing every canvas draw
+and every wall capture entirely on the CPU. This flag is macOS-only (ANGLE's Metal backend
+doesn't exist elsewhere); other platforms get Chromium's own default backend selection.
 
 ## Testing
 

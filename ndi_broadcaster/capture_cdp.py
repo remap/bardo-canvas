@@ -20,11 +20,11 @@ def decode_captured_frame(
 ) -> np.ndarray:
     """Decode a captured (JPEG/PNG) frame to an RGBA array.
 
-    CDP's ``maxWidth``/``maxHeight`` (used by Page.startScreencast) are upper bounds,
-    not guarantees. Headless Chrome has no physical display to be smaller than the
-    configured capture resolution the way a headed kiosk window once could, so a
-    mismatch here would be unexpected -- kept as a safety net regardless, since a
-    wrong-shaped frame must never reach the NDI sender.
+    image_bytes comes from window.__ndiCaptureDataURL() (static/layout-driver.js), a
+    plain canvas.toDataURL() JPEG -- always exactly the configured canvas resolution
+    in practice, since it's drawn onto a canvas explicitly sized to
+    layoutConfig.canvas.width/height. The resize path below is a safety net, not an
+    expected case: a wrong-shaped frame must never reach the NDI sender.
     """
     global _logged_first_frame, _warned_size_mismatch, _last_debug_dump
     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")

@@ -226,24 +226,48 @@ export function enableScreenshotResponder(driver) {
     );
   }
 
-  async function composite() {
-    const offscreen = document.createElement("canvas");
-    offscreen.width = driver.layoutConfig.canvas.width;
-    offscreen.height = driver.layoutConfig.canvas.height;
-    const ctx = offscreen.getContext("2d");
-    ctx.fillStyle = "black";
-    ctx.fillRect(0, 0, offscreen.width, offscreen.height);
+  // Created once and reused, not allocated fresh per call: __ndiCaptureDataURL()
+  // (below) is called up to config.fps times per second, sustained for the life of
+  // the broadcast. A fresh canvas().createElement() per call -- fine at this
+  // function's original call rate (at most once per screenshot_request, i.e. rare)
+  // -- leaked a GPU-backed canvas buffer every call at that rate, which live testing
+  // traced to two failure modes depending on GPU backend: a slow climb in capture
+  // latency (Metal, GPU resources exhausted gradually) and an outright renderer
+  // crash after ~30s (SwiftShader, software-side allocation exhausted faster).
+  const offscreen = document.createElement("canvas");
+  offscreen.width = driver.layoutConfig.canvas.width;
+  offscreen.height = driver.layoutConfig.canvas.height;
+  const offscreenCtx = offscreen.getContext("2d");
+
+  function compositeToCanvas() {
+    offscreenCtx.fillStyle = "black";
+    offscreenCtx.fillRect(0, 0, offscreen.width, offscreen.height);
 
     for (const placement of computeCompositePlacements(driver.layoutConfig.screens)) {
       const canvas = findCanvas(placement.id);
       if (!canvas) {
         continue;
       }
-      ctx.drawImage(canvas, placement.dx, placement.dy, placement.dWidth, placement.dHeight);
+      offscreenCtx.drawImage(canvas, placement.dx, placement.dy, placement.dWidth, placement.dHeight);
     }
-
-    return new Promise((resolve) => offscreen.toBlob(resolve, "image/png"));
+    return offscreen;
   }
+
+  async function composite() {
+    return new Promise((resolve) => compositeToCanvas().toBlob(resolve, "image/png"));
+  }
+
+  // Exposed for the NDI broadcaster to read directly via page.evaluate() -- CDP's own
+  // screenshot/screencast APIs (Page.captureScreenshot, Page.startScreencast) were
+  // found, live, to return solid black for this app's canvases despite them having
+  // provably-correct pixel data (confirmed via ctx.getImageData() at the exact same
+  // coordinates, reproduced with/without GPU acceleration and across both Chromium
+  // binaries Playwright can select -- a real bug in Chromium's viewport-level capture
+  // for this canvas-drawing pattern, not a timing or config issue on our end).
+  // toDataURL() reads the canvas's own buffer directly and was proven reliable
+  // throughout that investigation; page.evaluate() runs over the same CDP connection
+  // Playwright already holds to drive this browser -- no HTTP/network round trip.
+  window.__ndiCaptureDataURL = () => compositeToCanvas().toDataURL("image/jpeg", 0.85);
 
   driver.onMessage(async (message) => {
     if (message.type !== "screenshot_request") {
