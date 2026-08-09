@@ -51,3 +51,9 @@ def test_get_device_match_js(client):
     response = client.get("/device-match.js")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
+
+
+def test_get_backoff_js(client):
+    response = client.get("/backoff.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]

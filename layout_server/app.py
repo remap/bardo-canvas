@@ -83,7 +83,12 @@ def create_app(
 
         return handler
 
-    for framework_js_filename in ("layout-driver.js", "geometry.js", "device-match.js"):
+    for framework_js_filename in (
+        "layout-driver.js",
+        "geometry.js",
+        "device-match.js",
+        "backoff.js",
+    ):
         app.get(f"/{framework_js_filename}")(_framework_js_route(framework_js_filename))
 
     app.mount("/", StaticFiles(directory=app_static_dir, html=True), name="app")

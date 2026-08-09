@@ -1,5 +1,6 @@
 import { computeCoverFit, computeCompositePlacements } from "./geometry.js";
 import { matchDeviceByName } from "./device-match.js";
+import { nextReconnectDelay, RECONNECT_BASE_DELAY_MS } from "./backoff.js";
 
 async function fetchScreens() {
   const response = await fetch("/api/screens");
@@ -60,6 +61,8 @@ function buildRoot(layoutConfig) {
 }
 
 function connectWebSocket(handlers, onConnectionChange) {
+  let reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+
   function connect() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
@@ -70,6 +73,7 @@ function connectWebSocket(handlers, onConnectionChange) {
       }
     });
     ws.addEventListener("open", () => {
+      reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
       onConnectionChange(true);
       for (const handler of handlers) {
         handler({ type: "_connected" });
@@ -77,7 +81,8 @@ function connectWebSocket(handlers, onConnectionChange) {
     });
     ws.addEventListener("close", () => {
       onConnectionChange(false);
-      setTimeout(connect, 1000);
+      setTimeout(connect, reconnectDelayMs);
+      reconnectDelayMs = nextReconnectDelay(reconnectDelayMs);
     });
     return ws;
   }
