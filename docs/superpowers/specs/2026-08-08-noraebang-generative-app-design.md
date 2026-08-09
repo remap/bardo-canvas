@@ -14,7 +14,7 @@ Pure static app — **no backend process**. `layout_server` serves `apps/noraeba
 - `static/index.html` — loads `layout-driver.js`, `theme.js`, and the 6 sketch modules as native ES modules (no bundler).
 - `static/theme.js` — shared palette module: near-black background (`#050208`-ish) and a small fixed set of neon accent colors (magenta, cyan, gold, violet, electric blue). Every sketch imports this rather than defining its own colors, so six different techniques still read as one coherent wall.
 - `static/sketches/*.js` — one module per screen, each exporting a p5 instance-mode sketch factory `(p) => { p.setup = ...; p.draw = ...; }`.
-- `config/noraebang.yaml` — maps screen id → sketch module name (+ optional per-sketch param overrides), so reassigning/tuning sketches never touches code.
+- `static/config/noraebang.json` — maps screen id → sketch module name (+ optional per-sketch param overrides), so reassigning/tuning sketches never touches code. JSON rather than YAML: this file is fetched and parsed entirely in the browser, which has no built-in YAML parser (every other YAML config in this repo is consumed by Python, which already depends on PyYAML) — see the framework's global constraints for the full reasoning. It lives under `static/` rather than as a sibling of it because `layout_server`'s catch-all static mount only serves `app_static_dir` (`apps/<name>/static/`), so anything outside `static/` is unreachable to the browser.
 - `assets/track.mp3` — looped ambient audio (placeholder shipped initially; see §5).
 
 ## 3. Sketch roster
@@ -28,22 +28,19 @@ Pure static app — **no backend process**. `layout_server` serves `apps/noraeba
 | A | `vu-bars.js` | Non-reactive but rhythmic animated equalizer bars |
 | E | `scanline-crt.js` | Retro CRT scanline + VHS glitch texture |
 
-Each is a genuinely distinct generative technique (not the same algorithm reparameterized), unified only through the shared `theme.js` palette. `config/noraebang.yaml`:
+Each is a genuinely distinct generative technique (not the same algorithm reparameterized), unified only through the shared `theme.js` palette. `static/config/noraebang.json`:
 
-```yaml
-screens:
-  - id: F
-    sketch: flow-field
-  - id: B
-    sketch: particle-swarm
-  - id: C
-    sketch: laser-grid
-  - id: D
-    sketch: mirror-ball
-  - id: A
-    sketch: vu-bars
-  - id: E
-    sketch: scanline-crt
+```json
+{
+  "screens": [
+    { "id": "F", "sketch": "flow-field" },
+    { "id": "B", "sketch": "particle-swarm" },
+    { "id": "C", "sketch": "laser-grid" },
+    { "id": "D", "sketch": "mirror-ball" },
+    { "id": "A", "sketch": "vu-bars" },
+    { "id": "E", "sketch": "scanline-crt" }
+  ]
+}
 ```
 
 ## 4. Wiring to the framework
@@ -51,7 +48,7 @@ screens:
 On load, `index.html`'s bootstrap script:
 
 1. `import`s `initLayoutDriver` and `routeAudioElement` from `/layout-driver.js`, and `await`s `const driver = await initLayoutDriver();` (screens loaded from `/api/screens` as part of that call — there is no separate `.ready` to await, `initLayoutDriver()` itself resolves once the driver is usable).
-2. Fetches `config/noraebang.yaml`, and for each screen: dynamically `import()`s the assigned sketch module, gets that screen's container via `driver.getScreenContainer(id)`, and constructs `new p5(sketchFactory, container.element)`.
+2. Fetches `config/noraebang.json`, and for each screen: dynamically `import()`s the assigned sketch module, gets that screen's container via `driver.getScreenContainer(id)`, and constructs `new p5(sketchFactory, container.element)`.
 3. Each p5 instance calls `p.createCanvas(container.width, container.height)` inside its own `setup()` — sized exactly to its screen, no cropping needed since these are native-resolution sketches, not pushed images.
 
 This app never touches `enableImageMode(driver)`, `/ws`, or the push API — the layout-server and WebSocket relay are irrelevant to it, as noted in the framework spec's data-flow examples.
@@ -84,8 +81,8 @@ apps/noraebang-generative/
       mirror-ball.js
       vu-bars.js
       scanline-crt.js
-  assets/track.mp3
-  config/noraebang.yaml
+    config/noraebang.json
+    assets/track.mp3
 ```
 
 ## 9. Testing
@@ -98,4 +95,4 @@ apps/noraebang-generative/
 
 - No audio reactivity (confirmed in the framework brainstorm — visuals are purely time/parameter-driven, not listening to any input).
 - No user interaction/controls (mouse, keyboard, touch) — fully autonomous generative output.
-- No runtime sketch switching — the screen→sketch mapping is fixed per `config/noraebang.yaml` for the life of the process; changing it requires a restart.
+- No runtime sketch switching — the screen→sketch mapping is fixed per `config/noraebang.json` for the life of the process; changing it requires a restart.

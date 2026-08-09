@@ -183,7 +183,7 @@ Apps are strictly isolated under their own `apps/<name>/` directory (own static 
 ## 7. Testing
 
 - `pytest` unit tests for `screens.yaml` loading and rect computation, using the exact fixture table in §2 as expected output, plus an overlap-rejection test.
-- A small JS unit test (or plain Node script run in CI) for the cover-fit crop math, covering the three aspect ratios actually present (9:7, 2:1, 4:1).
+- A small JS unit test (run manually via `node --test`, no CI pipeline wired up) for the cover-fit crop math, covering the three aspect ratios actually present (9:7, 2:1, 4:1).
 - A `pytest` unit test for the device-name-matching function (exact match, case-insensitive substring match, not-found → `None`/fallback), run against a fixture device list — no real audio hardware needed.
 - A JS unit test for the screenshot compositing placement math (given the §2 screen-rect fixtures and stub canvases, assert each is drawn at its correct offset in the 3840×2160 composite) — direct placement only, no cropping, so this is simpler than the cover-fit test above. The end-to-end request/response round trip over `/ws` is covered by the manual pipeline smoke test below.
 - Manual pipeline smoke test using `apps/test-pattern/`: run `run.sh`, confirm each screen shows its correctly-positioned/sized labeled rectangle in the captured NDI output before either real app is built. NDI/capture correctness beyond that is verified manually (no practical way to unit test actual OS-level screen capture or NDI output).
@@ -200,7 +200,7 @@ Apps are strictly isolated under their own `apps/<name>/` directory (own static 
 Chosen to keep the implementation small and readable, favoring current, actively-maintained tooling over legacy defaults:
 
 - **Python 3.13**, managed with `uv` (dependency resolution + venv + running — replaces pip/venv/poetry with one fast tool). Modern typing throughout: PEP 695 generic/type-alias syntax (`type ScreenId = str`) where it helps, `dataclasses`/Pydantic v2 models for config (not raw dicts), structural `match`/`case` for the small WS-message-type dispatch. FastAPI's `lifespan` context manager for startup/shutdown (device discovery, cert bootstrap check) rather than the deprecated `on_event` hooks.
-- **`ruff`** for lint + format (single fast tool, replaces flake8+black+isort); a type checker (`pyright` or `mypy`) run in CI.
+- **`ruff`** for lint + format (single fast tool, replaces flake8+black+isort). No CI pipeline or standalone type checker (`pyright`/`mypy`) is set up as of this writing — `uv run ruff check`/`ruff format --check` plus the test suites are run manually; a type checker would be a reasonable future addition if this grows a CI workflow, not something currently enforced.
 - **`sounddevice`** for audio device enumeration/capture (same library karaoke-test already uses — proven for this exact job), **`cyndilib`** for NDI send, **Pillow** for image decode/validate, **Playwright** for browser automation.
 - **JavaScript**: no bundler/build step — native ES modules (`<script type="module">`), `fetch`, `WebSocket`, `structuredClone`; kept dependency-free except **p5.js** (current major version, ESM import, instance mode) for the generative sample app. Avoiding build tooling here is itself the "keep it simple" choice for a small kiosk page, not a gap.
 - **YAML** (via `PyYAML`) for all config files, matching the existing gentree/karaoke-test convention.

@@ -29,6 +29,14 @@ Framework alone (serves `apps/test-pattern/static/`, the default):
 `run.sh` also accepts the app directory as a positional argument, equivalent to setting
 `APP_DIR`: `./run.sh /path/to/app/static`.
 
+If you preview the composited page directly in a browser (rather than only through the
+NDI broadcaster, which sets `ignore_https_errors`), you'll hit a self-signed-certificate
+warning on first load — click through it, that's expected (see the framework spec §3.1).
+
+Once running, confirm the NDI stream is actually visible with an NDI monitoring tool on
+the same network (e.g. NDI Tools' Studio Monitor) — this repo's own job stops at
+producing the stream; what downstream AV hardware does with it is out of scope here.
+
 ### noraebang-generative
 
 Pure client-side p5.js generative sketches, one per screen, with a looping audio bed.
