@@ -1,4 +1,4 @@
-import { PALETTE } from "../theme.js";
+import { BACKGROUND_COLOR, PALETTE } from "../theme.js";
 
 const BOID_COUNT = 90;
 const MAX_SPEED = 2.4;
@@ -15,12 +15,12 @@ export function createSketch(width, height) {
         vel: p5.Vector.random2D().mult(MAX_SPEED),
         color: p.random(PALETTE),
       }));
-      p.background(5, 2, 8);
+      p.background(BACKGROUND_COLOR);
     };
 
     p.draw = () => {
       p.noStroke();
-      p.fill(5, 2, 8, 30);
+      p.fill(BACKGROUND_COLOR + "1E");
       p.rect(0, 0, width, height);
 
       for (const boid of boids) {

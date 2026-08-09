@@ -1,4 +1,4 @@
-import { PALETTE } from "../theme.js";
+import { BACKGROUND_COLOR, PALETTE } from "../theme.js";
 
 const SCANLINE_SPACING = 4;
 
@@ -11,7 +11,7 @@ export function createSketch(width, height) {
     };
 
     p.draw = () => {
-      p.background(4, 2, 7);
+      p.background(BACKGROUND_COLOR);
       t += 1;
 
       p.noStroke();

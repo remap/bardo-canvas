@@ -21,7 +21,7 @@ export function createSketch(width, height) {
 
     p.draw = () => {
       p.noStroke();
-      p.fill(5, 2, 8, 18);
+      p.fill(BACKGROUND_COLOR + "12");
       p.rect(0, 0, width, height);
 
       zOffset += 0.002;

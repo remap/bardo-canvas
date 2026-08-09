@@ -1,4 +1,4 @@
-import { PALETTE } from "../theme.js";
+import { BACKGROUND_COLOR, PALETTE } from "../theme.js";
 
 const GRID_SPACING = 90;
 
@@ -11,7 +11,7 @@ export function createSketch(width, height) {
     };
 
     p.draw = () => {
-      p.background(5, 2, 8);
+      p.background(BACKGROUND_COLOR);
       t += 0.02;
 
       p.strokeWeight(2);

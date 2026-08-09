@@ -1,4 +1,4 @@
-import { PALETTE } from "../theme.js";
+import { BACKGROUND_COLOR, PALETTE } from "../theme.js";
 
 const BAR_COUNT = 32;
 
@@ -13,7 +13,7 @@ export function createSketch(width, height) {
     };
 
     p.draw = () => {
-      p.background(4, 2, 7);
+      p.background(BACKGROUND_COLOR);
       t += 0.05;
 
       for (let i = 0; i < BAR_COUNT; i++) {

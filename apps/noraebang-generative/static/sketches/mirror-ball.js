@@ -1,4 +1,4 @@
-import { PALETTE } from "../theme.js";
+import { BACKGROUND_COLOR, PALETTE } from "../theme.js";
 
 const FACET_COLS = 24;
 const FACET_ROWS = 18;
@@ -15,7 +15,7 @@ export function createSketch(width, height) {
     };
 
     p.draw = () => {
-      p.background(3, 1, 5);
+      p.background(BACKGROUND_COLOR);
       t += 0.03;
 
       for (let row = 0; row < FACET_ROWS; row++) {
