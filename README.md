@@ -3,7 +3,7 @@
 Drives a 6-screen LED wall from a single composited browser page. `config/screens.yaml`
 is the source of truth for the wall's geometry: the server hands that layout to the page,
 the page draws every screen into one 3840×2160 canvas, and the NDI broadcaster captures
-that page in a kiosk Chrome instance and sends it out as a single NDI stream (plus audio).
+that page in a headless Chrome instance and sends it out as a single NDI stream (plus audio).
 Apps are plain static directories that import `/layout-driver.js`; the framework itself
 never knows what they draw.
 
@@ -37,6 +37,42 @@ Once running, confirm the NDI stream is actually visible with an NDI monitoring 
 the same network (e.g. NDI Tools' Studio Monitor) — this repo's own job stops at
 producing the stream; what downstream AV hardware does with it is out of scope here.
 
+### Prototyping an app
+
+The NDI broadcaster runs a fully headless, uninstrumented browser — there is no window to
+look at, on purpose (see "Why the broadcaster is headless" below). To actually watch an
+app while you build it, in a normal resizable window, just open the composited page
+directly in any ordinary browser:
+
+```
+https://localhost:8443/
+```
+
+(click through the self-signed-cert warning above). This is not a special dev mode — it's
+the same page the broadcaster captures, driven by the same WebSocket sync the broadcaster
+uses, so it shows the real layout and behavior. `buildRoot()` already rescales the whole
+composited canvas to fit the window on every resize, so the window is freely resizable
+with no extra code or flags.
+
+This is safe to leave open alongside a running broadcaster: nothing about the broadcaster
+ever touches, screenshots, or otherwise depends on this tab, so resizing or closing it has
+zero effect on the NDI feed. Two things won't match exactly between a preview tab and the
+broadcast, both expected: audio will double up if both are un-muted, and for direct-render
+apps (noraebang-generative) each browser instance runs its own independent sketch
+instance, so the two won't be pixel-identical — same layout and behavior, different random
+seed/timing. For a byte-for-byte check of the actual broadcast signal, use an NDI monitor
+instead (see above); reach for that only for final verification, not the everyday dev loop.
+
+#### Why the broadcaster is headless
+
+Earlier versions launched a real, visible kiosk-mode Chrome window and captured it. That
+window doesn't exist anymore, and needing this section is exactly why: capturing a
+*visible* window at 30fps via repeated CDP screenshot calls was found to visibly flash the
+window itself (confirmed by isolating the same launch with the capture loop removed
+entirely — no flashing without it). Headless has no on-screen presentation to disrupt.
+Nothing here needs a real window in the first place — app audio is a plain `<audio>`
+element, not DRM.
+
 ### noraebang-generative
 
 Pure client-side p5.js generative sketches, one per screen, with a looping audio bed.
@@ -68,6 +104,18 @@ GEMINI_API_KEY=... apps/flux-gallery/run.sh
 Disk usage: the worker retains the most recent 200 images per screen plus 200 full-wall
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`
 (gitignored).
+
+## Performance: GPU acceleration on macOS
+
+Playwright's bundled headless Chromium defaults to the SwiftShader *software* renderer —
+confirmed live via CDP's `SystemInfo.getInfo`, every canvas draw and every wall capture
+was being rasterized entirely on the CPU, producing an inconsistent, well-below-target
+capture rate (observed: oscillating 12–28fps against a 30fps target) that reads as choppy
+on the NDI feed. On macOS, `_chrome_launch_args()` (`ndi_broadcaster/launcher.py`) adds
+`--use-angle=metal`, switching Chromium to the real GPU via Apple's Metal API — confirmed
+live to bring capture to a steady ~28–30fps. This flag is macOS-only (ANGLE's Metal
+backend doesn't exist elsewhere); other platforms get Chromium's own default backend
+selection rather than a blindly-guessed flag.
 
 ## Testing
 
