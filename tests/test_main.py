@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from layout_server.main import REPO_ROOT, resolve_settings
+from layout_server.main import REPO_ROOT, _log_format, resolve_settings
 
 
 def test_resolve_settings_defaults():
@@ -29,3 +29,13 @@ def test_resolve_settings_env_overrides():
     assert settings.app_static_dir == Path("/tmp/custom-app")
     assert settings.runtime_dir == Path("/tmp/custom-runtime")
     assert settings.cert_path == Path("/tmp/custom-runtime/cert.pem")
+
+
+def test_log_format_without_port_matches_original_format():
+    assert _log_format({}) == "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def test_log_format_with_port_adds_prefix():
+    assert _log_format({"LAYOUT_DRIVER_PORT": "8444"}) == (
+        "%(asctime)s [:8444] %(levelname)s %(name)s: %(message)s"
+    )

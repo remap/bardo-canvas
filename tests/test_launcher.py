@@ -8,13 +8,40 @@ import pytest
 
 from ndi_broadcaster.config import BroadcasterConfig
 from ndi_broadcaster.launcher import (
+    REPO_ROOT,
     HealthCheckTimeoutError,
     _chrome_launch_args,
     _LatestFrameSlot,
+    _log_format,
+    resolve_launcher_paths,
     resolve_target_url,
     run,
     wait_for_healthy,
 )
+
+
+def test_resolve_launcher_paths_defaults():
+    paths = resolve_launcher_paths({})
+    assert paths.broadcaster_yaml == REPO_ROOT / "config" / "broadcaster.yaml"
+    assert paths.audio_yaml == REPO_ROOT / "config" / "audio.yaml"
+
+
+def test_resolve_launcher_paths_env_overrides():
+    paths = resolve_launcher_paths(
+        {"BROADCASTER_YAML": "/tmp/instance/broadcaster.yaml", "AUDIO_YAML": "/tmp/instance/audio.yaml"}
+    )
+    assert str(paths.broadcaster_yaml) == "/tmp/instance/broadcaster.yaml"
+    assert str(paths.audio_yaml) == "/tmp/instance/audio.yaml"
+
+
+def test_log_format_without_port_matches_original_format():
+    assert _log_format({}) == "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def test_log_format_with_port_adds_prefix():
+    assert _log_format({"LAYOUT_DRIVER_PORT": "8444"}) == (
+        "%(asctime)s [:8444] %(levelname)s %(name)s: %(message)s"
+    )
 
 
 class _HealthyHandler(http.server.BaseHTTPRequestHandler):

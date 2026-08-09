@@ -10,6 +10,22 @@ export APP_DIR="${1:-${APP_DIR:-$REPO_ROOT/apps/test-pattern/static}}"
 export LAYOUT_DRIVER_HOST="${LAYOUT_DRIVER_HOST:-0.0.0.0}"
 export LAYOUT_DRIVER_PORT="${LAYOUT_DRIVER_PORT:-8443}"
 
+# One instance = one config directory + one port. LAYOUT_DRIVER_CONFIG_DIR
+# defaults to config/ (today's exact layout), so a second instance only needs
+# to set this plus LAYOUT_DRIVER_PORT to a distinct value. Any of the three
+# YAML paths or the runtime dir can still be overridden individually -- those
+# always win over the config-dir-derived default.
+export LAYOUT_DRIVER_CONFIG_DIR="${LAYOUT_DRIVER_CONFIG_DIR:-$REPO_ROOT/config}"
+export SCREENS_YAML="${SCREENS_YAML:-$LAYOUT_DRIVER_CONFIG_DIR/screens.yaml}"
+export AUDIO_YAML="${AUDIO_YAML:-$LAYOUT_DRIVER_CONFIG_DIR/audio.yaml}"
+export BROADCASTER_YAML="${BROADCASTER_YAML:-$LAYOUT_DRIVER_CONFIG_DIR/broadcaster.yaml}"
+if [[ "$LAYOUT_DRIVER_CONFIG_DIR" == "$REPO_ROOT/config" ]]; then
+  DEFAULT_RUNTIME_DIR="$REPO_ROOT/runtime"
+else
+  DEFAULT_RUNTIME_DIR="$REPO_ROOT/runtime-$(basename "$LAYOUT_DRIVER_CONFIG_DIR")"
+fi
+export LAYOUT_DRIVER_RUNTIME_DIR="${LAYOUT_DRIVER_RUNTIME_DIR:-$DEFAULT_RUNTIME_DIR}"
+
 uv run python -m layout_server.main &
 SERVER_PID=$!
 

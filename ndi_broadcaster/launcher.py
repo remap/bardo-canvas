@@ -8,6 +8,7 @@ import os
 import platform
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -21,7 +22,33 @@ from .capture_cdp import decode_captured_frame
 from .config import BroadcasterConfig, load_broadcaster_config
 from .ndi_sender import VideoSender
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LauncherPaths:
+    broadcaster_yaml: Path
+    audio_yaml: Path
+
+
+def resolve_launcher_paths(env: dict[str, str]) -> LauncherPaths:
+    """Resolve this process's config paths, anchored to REPO_ROOT by default.
+
+    Anchoring to REPO_ROOT (rather than a bare relative path) matches
+    layout_server/main.py's resolve_settings() -- it means these defaults no
+    longer depend on run.sh's `cd` into the repo root happening first. AUDIO_YAML
+    reuses the exact env var name layout_server/main.py already reads for the
+    same file: server and broadcaster must agree on one instance's audio device
+    pair, so they share one name rather than each having their own.
+    """
+    return LauncherPaths(
+        broadcaster_yaml=Path(
+            env.get("BROADCASTER_YAML", str(REPO_ROOT / "config" / "broadcaster.yaml"))
+        ),
+        audio_yaml=Path(env.get("AUDIO_YAML", str(REPO_ROOT / "config" / "audio.yaml"))),
+    )
 
 
 class HealthCheckTimeoutError(RuntimeError):
@@ -275,11 +302,18 @@ async def _capture_loop(
 
 
 def run(
-    config_path: str = "config/broadcaster.yaml",
-    audio_config_path: str = "config/audio.yaml",
+    config_path: str | None = None,
+    audio_config_path: str | None = None,
 ) -> None:
+    env = dict(os.environ)
+    paths = resolve_launcher_paths(env)
+    if config_path is None:
+        config_path = str(paths.broadcaster_yaml)
+    if audio_config_path is None:
+        audio_config_path = str(paths.audio_yaml)
+
     config = load_broadcaster_config(Path(config_path))
-    config = resolve_target_url(config, dict(os.environ))
+    config = resolve_target_url(config, env)
     if config.capture_backend == "sck":
         raise NotImplementedError(
             "The 'sck' capture backend is not implemented yet; "
@@ -338,8 +372,16 @@ def run(
         sender.close()
 
 
+def _log_format(env: dict[str, str]) -> str:
+    """A port prefix distinguishes one instance's log lines from another's when
+    multiple instances run in the same terminal/log aggregator. Omitted when
+    LAYOUT_DRIVER_PORT isn't set, so output outside run.sh is unchanged.
+    """
+    port = env.get("LAYOUT_DRIVER_PORT")
+    prefix = f"[:{port}] " if port else ""
+    return f"%(asctime)s {prefix}%(levelname)s %(name)s: %(message)s"
+
+
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format=_log_format(dict(os.environ)))
     run()
