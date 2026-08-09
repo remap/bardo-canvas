@@ -1,6 +1,6 @@
 base:
   model: "black-forest-labs/FLUX.1-schnell"
-  gemini_model: "gemini-2.5-flash"
+  gemini_model: "gemini-flash-latest"
   num_inference_steps: 4
   queue_size: 5
   refill_when_below: 2

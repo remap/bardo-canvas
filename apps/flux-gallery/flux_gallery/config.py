@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 class BaseGenerationConfig(BaseModel):
     model: str = "black-forest-labs/FLUX.1-schnell"
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-latest"
     num_inference_steps: int = 4
     queue_size: int = 5
     refill_when_below: int = 2

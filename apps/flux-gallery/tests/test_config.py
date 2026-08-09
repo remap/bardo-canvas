@@ -17,7 +17,7 @@ def test_load_prompts_config_has_six_screens_with_independent_meta_prompts():
 def test_base_config_defaults_match_prompts_yaml():
     config = load_prompts_config(PROMPTS_YAML)
     assert config.base.model == "black-forest-labs/FLUX.1-schnell"
-    assert config.base.gemini_model == "gemini-2.5-flash"
+    assert config.base.gemini_model == "gemini-flash-latest"
     assert config.base.num_inference_steps == 4
     assert config.base.queue_size == 5
     assert config.base.refill_when_below == 2
