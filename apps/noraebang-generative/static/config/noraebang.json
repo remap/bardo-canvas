@@ -1,0 +1,10 @@
+{
+  "screens": [
+    { "id": "F", "sketch": "flow-field" },
+    { "id": "B", "sketch": "particle-swarm" },
+    { "id": "C", "sketch": "laser-grid" },
+    { "id": "D", "sketch": "mirror-ball" },
+    { "id": "A", "sketch": "vu-bars" },
+    { "id": "E", "sketch": "scanline-crt" }
+  ]
+}
