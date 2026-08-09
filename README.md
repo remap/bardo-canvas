@@ -105,6 +105,12 @@ Disk usage: the worker retains the most recent 200 images per screen plus 200 fu
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`
 (gitignored).
 
+**Known limitation:** NDI capture fps degrades steadily while this worker is running
+(not while idle), down to single digits over several minutes, with no recovery on its
+own short of restarting the broadcaster. This is specific to flux-gallery — traced via
+native profiling to the closed-source NDI SDK itself, not to Flux/GPU contention or
+anything else in this repo. See framework spec §3.4a for the full investigation.
+
 ## Performance and correctness: how NDI capture actually works
 
 The broadcaster does **not** use any Chrome DevTools Protocol screenshot API
