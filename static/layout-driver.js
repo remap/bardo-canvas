@@ -251,6 +251,13 @@ export function enableScreenshotResponder(driver) {
   return { composite };
 }
 
+async function requestMicrophoneAccessWithTimeout(timeoutMs) {
+  return Promise.race([
+    navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
+}
+
 export async function routeAudioElement(el) {
   const response = await fetch("/api/audio-config");
   const config = await response.json();
@@ -258,7 +265,7 @@ export async function routeAudioElement(el) {
     return;
   }
 
-  await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+  await requestMicrophoneAccessWithTimeout(3000);
   const devices = await navigator.mediaDevices.enumerateDevices();
   const outputs = devices
     .filter((device) => device.kind === "audiooutput")
