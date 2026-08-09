@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Flux Gallery</title>
+  </head>
+  <body>
+    <script type="module">
+      import { initLayoutDriver, enableImageMode, enableScreenshotResponder } from "/layout-driver.js";
+
+      const driver = await initLayoutDriver();
+      window.LayoutDriver = driver;
+      enableImageMode(driver);
+      enableScreenshotResponder(driver);
+    </script>
+  </body>
+</html>
