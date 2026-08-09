@@ -8,6 +8,7 @@ import pytest
 from ndi_broadcaster.config import BroadcasterConfig
 from ndi_broadcaster.launcher import (
     HealthCheckTimeoutError,
+    _chrome_launch_args,
     _LatestFrameSlot,
     resolve_target_url,
     run,
@@ -109,3 +110,9 @@ def test_latest_frame_slot_keeps_only_the_latest_value():
     assert slot.take() == "second"
     # No backlog: the superseded frame is gone, not queued behind the latest one.
     assert slot.take() is None
+
+
+def test_chrome_launch_args_include_kiosk_and_autoplay_policy():
+    args = _chrome_launch_args()
+    assert "--kiosk" in args
+    assert "--autoplay-policy=no-user-gesture-required" in args

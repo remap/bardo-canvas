@@ -115,13 +115,17 @@ def resolve_target_url(config: BroadcasterConfig, env: dict[str, str]) -> Broadc
     return config.model_copy(update={"target_url": override})
 
 
+def _chrome_launch_args() -> list[str]:
+    """Kiosk for a chrome-free full-screen wall; autoplay-policy so app audio
+    (noraebang's track) starts without a user gesture there is nobody to make."""
+    return ["--kiosk", "--autoplay-policy=no-user-gesture-required"]
+
+
 async def _capture_loop(
     config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
 ) -> None:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=False, args=["--kiosk", "--autoplay-policy=no-user-gesture-required"]
-        )
+        browser = await playwright.chromium.launch(headless=False, args=_chrome_launch_args())
         context = await browser.new_context(
             viewport={"width": config.width, "height": config.height},
             ignore_https_errors=True,
