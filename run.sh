@@ -4,7 +4,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-export APP_DIR="${APP_DIR:-$REPO_ROOT/apps/test-pattern/static}"
+# A positional argument selects the app, as an alternative to the APP_DIR env var:
+#   ./run.sh /path/to/app/static
+export APP_DIR="${1:-${APP_DIR:-$REPO_ROOT/apps/test-pattern/static}}"
 export LAYOUT_DRIVER_HOST="${LAYOUT_DRIVER_HOST:-0.0.0.0}"
 export LAYOUT_DRIVER_PORT="${LAYOUT_DRIVER_PORT:-8443}"
 
