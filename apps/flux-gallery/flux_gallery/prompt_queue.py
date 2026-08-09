@@ -30,8 +30,19 @@ class PromptQueue:
     def _try_refill(self) -> None:
         try:
             fresh = self._expander.expand(self._meta_prompt, self._queue_size)
-            self._prompts.extend(fresh)
         except Exception:
             logger.warning(
                 "Gemini prompt expansion failed; falling back to meta_prompt", exc_info=True
             )
+            return
+        if not fresh:
+            # A successful call that yielded nothing (e.g. unparseable text) is
+            # otherwise indistinguishable from "queue didn't need a refill yet".
+            logger.warning(
+                "Gemini prompt expansion returned no usable prompts; falling back to meta_prompt"
+            )
+            return
+        self._prompts.extend(fresh)
+        # extend() without a cap could grow the queue past queue_size across
+        # repeated refills that happen while prompts remain.
+        del self._prompts[self._queue_size :]

@@ -1,3 +1,5 @@
+import logging
+
 from flux_gallery.prompt_queue import PromptQueue
 
 
@@ -50,3 +52,30 @@ def test_fallback_to_meta_prompt_when_expander_raises():
 
     assert queue.pop() == "the meta prompt text"
     assert expander.calls == 1
+
+
+def test_empty_expander_response_warns_and_falls_back_to_meta_prompt(caplog):
+    expander = _FakeExpander(prompts=[])
+    queue = PromptQueue(
+        "the meta prompt text", queue_size=3, refill_when_below=2, expander=expander
+    )
+
+    with caplog.at_level(logging.WARNING, logger="flux_gallery.prompt_queue"):
+        assert queue.pop() == "the meta prompt text"
+
+    assert "no usable prompts" in caplog.text
+    assert expander.calls == 1
+    # An empty response must not look like a completed refill: the next pop tries again.
+    assert queue.pop() == "the meta prompt text"
+    assert expander.calls == 2
+
+
+def test_refill_never_grows_the_queue_past_queue_size():
+    expander = _FakeExpander(prompts=["a", "b", "c", "d", "e", "f", "g"])
+    queue = PromptQueue("meta", queue_size=3, refill_when_below=2, expander=expander)
+
+    queue.pop()  # refills with 7 prompts, which must be capped to 3, then pops one
+    assert len(queue._prompts) == 2
+
+    queue.pop()  # 2 <= 2 -> refills again on top of a partially drained queue
+    assert len(queue._prompts) == 2
