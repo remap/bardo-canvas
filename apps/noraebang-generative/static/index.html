@@ -8,7 +8,11 @@
   <body>
     <script type="module">
       import { initLayoutDriver, routeAudioElement } from "/layout-driver.js";
-      import { validateSketchAssignments, sketchModulePath } from "/sketch-loader.js";
+      import {
+        validateSketchAssignments,
+        validateScreenIds,
+        sketchModulePath,
+      } from "/sketch-loader.js";
 
       const driver = await initLayoutDriver();
       window.LayoutDriver = driver;
@@ -16,6 +20,10 @@
       const configResponse = await fetch("/config/noraebang.json");
       const config = await configResponse.json();
       const screens = validateSketchAssignments(config);
+      validateScreenIds(
+        screens,
+        driver.layoutConfig.screens.map((s) => s.id),
+      );
 
       for (const screen of screens) {
         try {

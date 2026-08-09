@@ -9,9 +9,9 @@ from pathlib import Path
 
 import httpx
 
-from layout_server.config import load_layout_config
+from layout_server.config import LayoutConfig, load_layout_config
 
-from .config import load_prompts_config
+from .config import PromptsConfig, load_prompts_config
 from .disk_history import save_and_prune
 from .flux_generator import FluxGenerator
 from .gemini_expander import GeminiExpander
@@ -50,6 +50,22 @@ def push_with_retry(
     raise last_exc
 
 
+def _validate_screen_ids(prompts_config: PromptsConfig, layout_config: LayoutConfig) -> None:
+    """Fail at boot on a prompts.yaml screen id the layout doesn't have.
+
+    Without this, a typo'd id only surfaces as a KeyError on screen_dims[screen_id]
+    whenever random.choice happens to pick it -- potentially hours in, and outside
+    every per-stage try/except, so it kills the worker.
+    """
+    known_ids = {screen.id for screen in layout_config.screens}
+    for screen in prompts_config.screens:
+        if screen.id not in known_ids:
+            raise ValueError(
+                f"prompts.yaml references unknown screen id {screen.id!r}; "
+                f"known screen ids from screens.yaml: {sorted(known_ids)}"
+            )
+
+
 def run_forever() -> None:
     screens_yaml = Path(os.environ.get("SCREENS_YAML", str(REPO_ROOT / "config" / "screens.yaml")))
     prompts_yaml = Path(os.environ.get("PROMPTS_YAML", str(APP_ROOT / "config" / "prompts.yaml")))
@@ -58,6 +74,7 @@ def run_forever() -> None:
 
     layout_config = load_layout_config(screens_yaml)
     prompts_config = load_prompts_config(prompts_yaml)
+    _validate_screen_ids(prompts_config, layout_config)
 
     expander = GeminiExpander(api_key=gemini_api_key, model=prompts_config.base.gemini_model)
     generator = FluxGenerator(

@@ -16,6 +16,16 @@ export function validateSketchAssignments(config) {
   return config.screens;
 }
 
+export function validateScreenIds(screens, knownScreenIds) {
+  const known = new Set(knownScreenIds);
+  for (const screen of screens) {
+    if (!known.has(screen.id)) {
+      throw new Error(`Unknown screen id "${screen.id}" in noraebang.json (not in the layout)`);
+    }
+  }
+  return screens;
+}
+
 export function sketchModulePath(sketchName) {
   return `./sketches/${sketchName}.js`;
 }

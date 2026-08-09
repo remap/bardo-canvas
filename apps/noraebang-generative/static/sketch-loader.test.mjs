@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateSketchAssignments, sketchModulePath } from "./sketch-loader.js";
+import {
+  validateSketchAssignments,
+  validateScreenIds,
+  sketchModulePath,
+} from "./sketch-loader.js";
 
 test("validateSketchAssignments accepts all six real screen/sketch pairs", () => {
   const config = {
@@ -24,4 +28,19 @@ test("validateSketchAssignments throws loudly on an unrecognized sketch name", (
 
 test("sketchModulePath resolves a sketch name to its module path", () => {
   assert.equal(sketchModulePath("flow-field"), "./sketches/flow-field.js");
+});
+
+test("validateScreenIds accepts screens whose ids are all in the real layout", () => {
+  const screens = [
+    { id: "F", sketch: "flow-field" },
+    { id: "E", sketch: "scanline-crt" },
+  ];
+  assert.equal(validateScreenIds(screens, ["F", "B", "C", "D", "A", "E"]), screens);
+});
+
+test("validateScreenIds throws on a screen id the layout does not have", () => {
+  assert.throws(
+    () => validateScreenIds([{ id: "Z", sketch: "flow-field" }], ["F", "B"]),
+    /Unknown screen id "Z"/,
+  );
 });
