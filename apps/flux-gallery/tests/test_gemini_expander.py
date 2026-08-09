@@ -1,3 +1,10 @@
+import pytest
+
+# flux_gallery.gemini_expander imports google.genai at module scope, so without the
+# flux-gallery extra installed this file would fail at collection with a raw
+# ModuleNotFoundError rather than a readable skip.
+pytest.importorskip("google.genai")
+
 from flux_gallery.gemini_expander import parse_expanded_prompts
 
 

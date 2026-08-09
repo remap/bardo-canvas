@@ -1,6 +1,11 @@
 from unittest.mock import patch
 
 import pytest
+
+# flux_gallery.worker -> flux_generator -> torch, so without the flux-gallery extra
+# installed this file would fail at collection with a raw ModuleNotFoundError.
+pytest.importorskip("torch")
+
 from flux_gallery.worker import push_with_retry
 
 
