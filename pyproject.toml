@@ -16,11 +16,24 @@ dependencies = [
     "numpy>=2.1",
 ]
 
+[project.optional-dependencies]
+flux-gallery = [
+    "google-genai>=1.0",
+    "diffusers>=0.31",
+    "transformers>=4.46",
+    "accelerate>=1.1",
+    "sentencepiece>=0.2",
+    "torch>=2.5",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
     "ruff>=0.7",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["apps/flux-gallery"]
 
 [tool.ruff]
 line-length = 100

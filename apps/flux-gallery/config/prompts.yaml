@@ -1,0 +1,20 @@
+base:
+  model: "black-forest-labs/FLUX.1-schnell"
+  gemini_model: "gemini-2.5-flash"
+  num_inference_steps: 4
+  queue_size: 5
+  refill_when_below: 2
+
+screens:
+  - id: F
+    meta_prompt: "A sweeping abstract landscape in bold saturated colors, painterly and dreamlike."
+  - id: B
+    meta_prompt: "Macro photography of natural textures: water, stone, bark, ice."
+  - id: C
+    meta_prompt: "Geometric op-art patterns in high contrast black, white, and one accent color."
+  - id: D
+    meta_prompt: "Retro-futuristic cityscapes at dusk, neon reflections, wide panoramic framing."
+  - id: A
+    meta_prompt: "Botanical illustrations of imaginary plants, detailed linework, muted palette."
+  - id: E
+    meta_prompt: "Slow-motion smoke and fluid dynamics rendered as fine art photography."
