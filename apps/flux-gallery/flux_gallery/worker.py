@@ -98,9 +98,12 @@ def run_forever() -> None:
             logger.exception("Failed to push image for screen %s; skipping cycle", screen_id)
             continue
 
-        save_and_prune(
-            output_dir / screen_id, _timestamp_filename(), image_bytes, keep=HISTORY_KEEP
-        )
+        try:
+            save_and_prune(
+                output_dir / screen_id, _timestamp_filename(), image_bytes, keep=HISTORY_KEEP
+            )
+        except Exception:
+            logger.exception("Failed to save history for screen %s; continuing", screen_id)
 
         try:
             wall_bytes = take_screenshot(http_client)
