@@ -82,3 +82,25 @@ def test_page_creates_six_canvases_with_no_console_errors_and_plays_audio(runnin
         browser.close()
 
     assert console_errors == []
+
+
+def test_screenshot_endpoint_returns_the_composited_wall(running_server):
+    # The broadcaster's NDI capture pipeline polls /api/screenshot for every app it
+    # drives, so every app must call enableScreenshotResponder() -- this app didn't,
+    # which only surfaced once something actually depended on the endpoint working.
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True, args=["--autoplay-policy=no-user-gesture-required"]
+        )
+        context = browser.new_context(ignore_https_errors=True)
+        page = context.new_page()
+        page.goto(running_server)
+        page.wait_for_timeout(3000)
+
+        response = httpx.post(f"{running_server}api/screenshot", verify=False, timeout=5.0)
+
+        browser.close()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:8] == b"\x89PNG\r\n\x1a\n"

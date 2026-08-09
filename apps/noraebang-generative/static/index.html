@@ -7,7 +7,7 @@
   </head>
   <body>
     <script type="module">
-      import { initLayoutDriver, routeAudioElement } from "/layout-driver.js";
+      import { initLayoutDriver, routeAudioElement, enableScreenshotResponder } from "/layout-driver.js";
       import {
         validateSketchAssignments,
         validateScreenIds,
@@ -16,6 +16,7 @@
 
       const driver = await initLayoutDriver();
       window.LayoutDriver = driver;
+      enableScreenshotResponder(driver);
 
       const configResponse = await fetch("/config/noraebang.json");
       const config = await configResponse.json();
