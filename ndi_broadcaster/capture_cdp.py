@@ -20,10 +20,11 @@ def decode_captured_frame(
 ) -> np.ndarray:
     """Decode a captured (JPEG/PNG) frame to an RGBA array.
 
-    Headless Chrome has no physical display to be smaller than the configured capture
-    resolution, so a mismatch here would indicate a real bug rather than the display-size
-    quirk this guarded against under headed capture -- kept as a safety net regardless,
-    since a wrong-shaped frame must never reach the NDI sender.
+    CDP's ``maxWidth``/``maxHeight`` (used by Page.startScreencast) are upper bounds,
+    not guarantees. Headless Chrome has no physical display to be smaller than the
+    configured capture resolution the way a headed kiosk window once could, so a
+    mismatch here would be unexpected -- kept as a safety net regardless, since a
+    wrong-shaped frame must never reach the NDI sender.
     """
     global _logged_first_frame, _warned_size_mismatch, _last_debug_dump
     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
@@ -38,8 +39,7 @@ def decode_captured_frame(
         if not _warned_size_mismatch:
             logger.warning(
                 "Captured frame %dx%d does not match configured capture resolution "
-                "%dx%d; stretching to fit. This usually means the display running "
-                "the kiosk window is smaller than the configured resolution.",
+                "%dx%d; stretching to fit.",
                 image.size[0],
                 image.size[1],
                 target_width,

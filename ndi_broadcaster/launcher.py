@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
@@ -80,20 +81,48 @@ def _sender_thread_loop(
     frame_interval = 1.0 / config.fps
     last_frame: np.ndarray | None = None
     next_deadline = time.monotonic()
+    decodes_since_log = 0
+    decode_seconds_since_log = 0.0
+    sends_since_log = 0
+    send_seconds_since_log = 0.0
+    last_log = time.monotonic()
     while not stop_event.is_set():
         data = frame_slot.take()
         if data is not None:
+            decode_start = time.monotonic()
             try:
                 last_frame = decode_captured_frame(
                     data, target_width=config.width, target_height=config.height
                 )
             except Exception:
                 logger.exception("Failed to decode a captured frame; skipping it")
+            decodes_since_log += 1
+            decode_seconds_since_log += time.monotonic() - decode_start
         if last_frame is not None:
+            send_start = time.monotonic()
             try:
                 sender.send(last_frame)
             except Exception:
                 logger.exception("Failed to send a frame; skipping it")
+            sends_since_log += 1
+            send_seconds_since_log += time.monotonic() - send_start
+        now = time.monotonic()
+        if now - last_log >= 5.0:
+            decode_avg = (decode_seconds_since_log / decodes_since_log * 1000) if decodes_since_log else 0.0
+            send_avg = (send_seconds_since_log / sends_since_log * 1000) if sends_since_log else 0.0
+            logger.info(
+                "NDI sender: %d decodes (%.1fms avg), %d sends (%.1fms avg) in the last %.1fs",
+                decodes_since_log,
+                decode_avg,
+                sends_since_log,
+                send_avg,
+                now - last_log,
+            )
+            decodes_since_log = 0
+            decode_seconds_since_log = 0.0
+            sends_since_log = 0
+            send_seconds_since_log = 0.0
+            last_log = now
         next_deadline += frame_interval
         # Sleep only the time still owed on this frame's budget: sender.send() already
         # self-clocks, so a flat sleep of frame_interval would halve the output rate.
@@ -138,11 +167,6 @@ def _chrome_launch_args() -> list[str]:
     return args
 
 
-# Set by buildRoot() in static/layout-driver.js -- created by every app via
-# initLayoutDriver(), so this works with no per-app opt-in required.
-_LAYOUT_ROOT_SELECTOR = "#layout-driver-root"
-
-
 async def _capture_loop(
     config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
 ) -> None:
@@ -156,11 +180,12 @@ async def _capture_loop(
         # flash; screenshot capture, content, and audio routing are all unaffected.
         browser = await playwright.chromium.launch(headless=True, args=_chrome_launch_args())
         context = await browser.new_context(
+            # Headless has no physical monitor to be smaller than this -- unlike the
+            # old headed kiosk window, Playwright's requested viewport is authoritative
+            # here, so #layout-driver-root's rescale() always resolves to scale=1 and
+            # root exactly fills the viewport. That's what makes capturing the whole
+            # viewport (via screencast, below) equivalent to capturing root directly.
             viewport={"width": config.width, "height": config.height},
-            # Pin this explicitly rather than rely on Playwright's (already 1.0)
-            # default: an element screenshot's pixel dimensions are the element's CSS
-            # size times this factor, and a silent mismatch here is exactly the kind of
-            # display-dependent bug this capture path exists to avoid.
             device_scale_factor=1,
             ignore_https_errors=True,
             permissions=["microphone"],
@@ -177,91 +202,72 @@ async def _capture_loop(
         )
         sender_thread.start()
 
-        # #layout-driver-root's CSS width/height are always the canvas's fixed
-        # 3840x2160 -- its transform: scale() (buildRoot(), sized to fit whatever the
-        # real window/display happens to be) never touches those, only how it's
-        # painted. A uniform scale on both dimensions can't change the aspect ratio,
-        # so root's rendered bounding box always keeps the exact canvas aspect ratio
-        # regardless of window/display size -- unlike capturing the whole viewport,
-        # which includes whatever letterboxing/margin surrounds root and previously
-        # caused screens to come out misplaced and wrongly sized on a display whose
-        # aspect ratio doesn't match the canvas's (observed live: a 3456x2234 laptop
-        # screen against the 3840x2160 canvas). Screenshotting root directly, at
-        # device_scale_factor=1, gives back exactly that aspect ratio at whatever
-        # (smaller) resolution it's currently rendered at; resizing that up to the
-        # configured capture resolution in decode_captured_frame is then a clean,
-        # non-distorting upscale, not a stretch across mismatched aspect ratios.
-        # locator.screenshot() runs Playwright's full actionability pipeline first --
-        # waiting for the element to be "stable" (not moving/resizing) and scrolled
-        # into view -- on every single call. Called back-to-back in a tight capture
-        # loop, that repeated scroll/layout recalculation was visible as flashing in
-        # the (now-removed) visible kiosk window. page.screenshot() with an explicit
-        # clip rect is a single raw CDP capture with none of that.
-        root_locator = page.locator(_LAYOUT_ROOT_SELECTOR)
-        await root_locator.wait_for(state="attached", timeout=30_000)
+        # page.screenshot() polling was tried here first (simpler, and correct for the
+        # aspect-ratio bug that made us drop CDP screencast originally -- see git log).
+        # It works, but a live extended run showed capture latency climbing steadily
+        # over minutes of sustained 30fps polling (30ms -> 200ms+) despite stable
+        # decode/send costs and no memory growth in any process -- Chromium's
+        # Page.captureScreenshot is built for occasional one-off snapshots, not
+        # sustained continuous capture, and something about repeated calls at video
+        # rates accumulates internal cost over time. Page.startScreencast is Chromium's
+        # actual purpose-built API for continuous, video-like capture: push-based (a
+        # frame only arrives on real compositor damage, not on our polling schedule)
+        # and used exactly this way by the karaoke-test project this framework
+        # generalizes from. The reason it was dropped here originally -- headed mode's
+        # real OS window being capped smaller than the configured resolution by the
+        # physical display, producing a wrong-aspect-ratio capture -- doesn't apply
+        # under headless: there is no physical window to be smaller than anything.
+        client = await context.new_cdp_session(page)
+        await client.send(
+            "Page.startScreencast",
+            {
+                "format": "jpeg",
+                "quality": 85,
+                "maxWidth": config.width,
+                "maxHeight": config.height,
+            },
+        )
 
-        # bounding_box() is a lightweight getBoundingClientRect() query, but it's still
-        # a full CDP round trip -- doing it on every frame doubled the number of CDP
-        # calls per frame for no benefit, since headless has no physical window a human
-        # could resize: once attached, root's box cannot change for the process's
-        # lifetime. Cache it, and only re-derive it if a capture ever actually fails
-        # (self-healing against the case where that assumption turns out to be wrong).
-        box = await root_locator.bounding_box(timeout=5_000)
-        if box is None:
-            raise RuntimeError(f"{_LAYOUT_ROOT_SELECTOR} has no bounding box")
+        # asyncio.create_task() only holds a weak reference to the task it schedules;
+        # with nothing else referencing it, the task can be garbage-collected before
+        # the ack is actually sent. CDP's screencast is flow-controlled -- it withholds
+        # the next frame until the current one is acked -- so a dropped ack eventually
+        # stalls the whole capture pipeline. Keeping a strong reference until each ack
+        # task completes prevents that (this exact bug, and this exact fix, previously
+        # shipped and reverted with this capture mechanism -- see git log).
+        pending_acks: set[asyncio.Task] = set()
 
-        # Paced to config.fps rather than looped as fast as each call resolves: an
-        # unthrottled loop was issuing CDP screenshot captures far faster than the
-        # video's actual frame rate, hammering the renderer -- observed live as visible
-        # flashing in the (now-removed) visible kiosk window.
-        frame_interval = 1.0 / config.fps
-        next_deadline = time.monotonic()
+        # Frames arrive by event, not on our schedule -- this is a rate/liveness
+        # check ("did screencast keep delivering frames"), not a latency measurement
+        # the way the old polling approach's was.
+        frames_since_log = 0
+        last_frame_log = time.monotonic()
 
-        # Real achieved-rate visibility: the configured fps is a pacing ceiling, not a
-        # guarantee -- a slow capture (encode cost, CDP round-trip latency) silently
-        # produces a lower actual rate, which reads as choppy/stepped motion on the
-        # output even though the sender thread keeps re-sending at a steady clock.
-        captures_since_log = 0
-        capture_seconds_since_log = 0.0
-        last_fps_log = time.monotonic()
+        def on_frame(params: dict) -> None:
+            nonlocal frames_since_log, last_frame_log
+            frame_slot.put(base64.b64decode(params["data"]))
+            task = asyncio.create_task(
+                client.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+            )
+            pending_acks.add(task)
+            task.add_done_callback(pending_acks.discard)
+
+            frames_since_log += 1
+            now = time.monotonic()
+            if now - last_frame_log >= 5.0:
+                logger.info(
+                    "NDI capture: %.1f frames/sec delivered by screencast in the last %.1fs",
+                    frames_since_log / (now - last_frame_log),
+                    now - last_frame_log,
+                )
+                frames_since_log = 0
+                last_frame_log = now
+
+        client.on("Page.screencastFrame", on_frame)
 
         try:
             while not stop_event.is_set():
-                capture_start = time.monotonic()
-                try:
-                    screenshot_bytes = await page.screenshot(
-                        clip=box, type="jpeg", quality=85, timeout=5_000
-                    )
-                    frame_slot.put(screenshot_bytes)
-                except Exception:
-                    logger.exception("Failed to capture the wall for NDI; re-deriving clip and retrying")
-                    try:
-                        box = await root_locator.bounding_box(timeout=5_000)
-                        if box is None:
-                            raise RuntimeError(f"{_LAYOUT_ROOT_SELECTOR} has no bounding box")
-                    except Exception:
-                        logger.exception("Failed to re-derive the capture clip; will keep retrying")
-
-                captures_since_log += 1
-                capture_seconds_since_log += time.monotonic() - capture_start
-                now = time.monotonic()
-                if now - last_fps_log >= 5.0:
-                    logger.info(
-                        "NDI capture: %.1f fps achieved (target %d), %.1fms avg capture latency",
-                        captures_since_log / (now - last_fps_log),
-                        config.fps,
-                        (capture_seconds_since_log / captures_since_log) * 1000,
-                    )
-                    captures_since_log = 0
-                    capture_seconds_since_log = 0.0
-                    last_fps_log = now
-
-                next_deadline += frame_interval
-                remaining = next_deadline - time.monotonic()
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                else:
-                    next_deadline = time.monotonic()
+                await asyncio.sleep(0.5)
         finally:
             stop_event.set()
             try:
