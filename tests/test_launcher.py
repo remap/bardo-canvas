@@ -175,7 +175,17 @@ class _FakeSender:
         self.sent = []
 
     def send(self, frame):
-        self.sent.append(frame)
+        # Copy, not append-by-reference: a real NDI SDK send copies into its
+        # own buffer, and _sender_thread_loop reuses the same mutable frame
+        # object across every send (TimecodeOverlay mutates `last_frame` in
+        # place). Storing references would make every entry in `self.sent`
+        # literally the same object, so a test comparing sent[0] to sent[-1]
+        # after the thread finishes would always see the final, fully-mutated
+        # state on both sides -- unable to fail even if a real drift
+        # regression were reintroduced. Copying here gives each entry an
+        # independent snapshot of the frame's content at the moment of that
+        # specific send call.
+        self.sent.append(frame.copy())
 
 
 def test_sender_thread_loop_defaults_to_decode_captured_frame(monkeypatch):
@@ -267,10 +277,10 @@ def test_sender_thread_loop_applies_timecode_overlay_when_enabled():
     thread.join(timeout=2.0)
 
     assert len(sender.sent) >= 1
-    # TimecodeOverlay mutates `decoded` in place (it's the same object
-    # `sender.sent` holds references to), so compare against the independent
-    # clean_reference copy taken before the thread ran -- proves the real
-    # TimecodeOverlay (not a stub) actually drew something in the top strip.
+    # TimecodeOverlay mutates `decoded` in place before _FakeSender.send()
+    # copies it, so compare against the independent clean_reference copy
+    # taken before the thread ran -- proves the real TimecodeOverlay (not a
+    # stub) actually drew something in the top strip.
     assert not np.array_equal(sender.sent[0][:100, :], clean_reference[:100, :])
 
 
@@ -309,11 +319,11 @@ def test_sender_thread_loop_timecode_does_not_drift_across_repeated_sends(monkey
     thread.join(timeout=2.0)
 
     assert len(sender.sent) >= 2
-    first_send = sender.sent[0].copy()
-    # sender.sent holds references to the SAME mutated `decoded` object across
-    # every send, so compare a snapshot taken right after send 1 (via .copy())
-    # against the object's state after all sends complete.
-    assert np.array_equal(first_send, sender.sent[-1])
+    # _FakeSender.send() now copies each frame, so sender.sent[0] and
+    # sender.sent[-1] are independent snapshots taken at genuinely different
+    # moments in time -- a real regression (snapshot() moved into the send
+    # branch) would make these diverge.
+    assert np.array_equal(sender.sent[0], sender.sent[-1])
 
 
 def test_sender_thread_loop_skips_timecode_overlay_when_disabled():
@@ -337,11 +347,10 @@ def test_sender_thread_loop_skips_timecode_overlay_when_disabled():
     thread.join(timeout=2.0)
 
     assert len(sender.sent) >= 1
-    # _FakeSender.send() stores frames by reference, so sender.sent[0] and
-    # `decoded` are the same object -- comparing against it directly can
-    # never fail regardless of whether the overlay ran. Comparing against an
-    # independent copy taken before the thread ran actually exercises the
-    # disabled path (mirrors clean_reference in the enabled-path test above).
+    # Comparing against an independent copy taken before the thread ran
+    # (rather than against `decoded` itself, which the loop may still mutate
+    # after this point) actually exercises the disabled path -- mirrors
+    # clean_reference in the enabled-path test above.
     assert np.array_equal(sender.sent[0], clean_reference)
 
 
