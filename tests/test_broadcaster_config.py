@@ -21,6 +21,8 @@ def test_load_broadcaster_config():
         height=2160,
         fps=30,
         healthz_timeout_seconds=30.0,
+        timecode_enabled=True,
+        timecode_position="top",
     )
 
 
@@ -53,3 +55,14 @@ def test_sck_fields_have_documented_defaults():
 def test_sck_display_mode_rejects_unknown_value():
     with pytest.raises(ValidationError):
         BroadcasterConfig(sck_display_mode="bogus")
+
+
+def test_timecode_fields_default_to_enabled_top():
+    config = BroadcasterConfig()
+    assert config.timecode_enabled is True
+    assert config.timecode_position == "top"
+
+
+def test_timecode_position_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        BroadcasterConfig(timecode_position="middle")
