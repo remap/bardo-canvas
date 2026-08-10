@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import re
 import time
 
 import fal_client
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # Rate limit (HTTP 429): a handful of quick retries clears most transient
 # throttling without burning the whole cycle's Gemini-expanded prompt.
@@ -18,12 +22,11 @@ FAL_BILLING_MAX_RETRIES = 6
 FAL_BILLING_BACKOFF_BASE = 30.0
 FAL_BILLING_BACKOFF_MAX = 300.0
 
-_BILLING_LOCK_MARKERS = ("locked", "exhausted", "balance", "suspended")
+_BILLING_LOCK_PATTERN = re.compile(r"\b(locked|exhausted|balance|suspended)\b")
 
 
 def _is_billing_lock(exc: fal_client.FalClientHTTPError) -> bool:
-    message = str(exc).lower()
-    return any(marker in message for marker in _BILLING_LOCK_MARKERS)
+    return bool(_BILLING_LOCK_PATTERN.search(str(exc).lower()))
 
 
 class FalBackend:
@@ -54,13 +57,26 @@ class FalBackend:
             except fal_client.FalClientHTTPError as exc:
                 if exc.status_code == 429 and rate_limit_attempts < FAL_MAX_RETRIES:
                     rate_limit_attempts += 1
-                    time.sleep(FAL_RATE_LIMIT_BACKOFF_BASE * (2 ** (rate_limit_attempts - 1)))
+                    backoff = FAL_RATE_LIMIT_BACKOFF_BASE * (2 ** (rate_limit_attempts - 1))
+                    logger.warning(
+                        "fal.ai rate limited; retrying in %.0fs (attempt %d/%d)",
+                        backoff,
+                        rate_limit_attempts,
+                        FAL_MAX_RETRIES,
+                    )
+                    time.sleep(backoff)
                     continue
                 if _is_billing_lock(exc) and billing_attempts < FAL_BILLING_MAX_RETRIES:
                     billing_attempts += 1
                     backoff = min(
                         FAL_BILLING_BACKOFF_BASE * (2 ** (billing_attempts - 1)),
                         FAL_BILLING_BACKOFF_MAX,
+                    )
+                    logger.warning(
+                        "fal.ai billing lock detected; retrying in %.0fs (attempt %d/%d)",
+                        backoff,
+                        billing_attempts,
+                        FAL_BILLING_MAX_RETRIES,
                     )
                     time.sleep(backoff)
                     continue

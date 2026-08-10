@@ -1,5 +1,13 @@
 import pytest
 
+# backend_registry imports both backends at module scope (backends.local -> torch,
+# diffusers; backends.fal -> fal_client), so without the flux-gallery extra installed
+# this file would fail at collection with a raw ModuleNotFoundError rather than a
+# readable skip.
+pytest.importorskip("torch")
+pytest.importorskip("diffusers")
+pytest.importorskip("fal_client")
+
 from flux_gallery.backend_registry import create_backend
 from flux_gallery.backends.fal import FalBackend
 from flux_gallery.config import BaseGenerationConfig

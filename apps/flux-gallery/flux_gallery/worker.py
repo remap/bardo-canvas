@@ -77,7 +77,7 @@ def _validate_backend_selection(backend_name: str, env: dict[str, str]) -> None:
     exception buried inside the worker's per-cycle catch-all on the first
     iteration.
     """
-    if backend_name == "fal" and "FAL_KEY" not in env:
+    if backend_name == "fal" and not env.get("FAL_KEY"):
         raise ValueError("backend 'fal' is selected but FAL_KEY is not set in the environment")
 
 
@@ -94,6 +94,7 @@ def run_forever() -> None:
     env = dict(os.environ)
     backend_name = _resolve_backend_name(env, prompts_config.base)
     _validate_backend_selection(backend_name, env)
+    logger.info("Using generation backend %r", backend_name)
 
     expander = GeminiExpander(api_key=gemini_api_key, model=prompts_config.base.gemini_model)
     generator = create_backend(backend_name, prompts_config.base)

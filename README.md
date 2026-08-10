@@ -100,6 +100,11 @@ GEMINI_API_KEY=... apps/flux-gallery/run.sh
 - `GEMINI_API_KEY` — **required** by the worker (prompt expansion).
 - `HF_TOKEN` — optional; only needed for gated or private models. FLUX.1-schnell, the
   default, is open.
+- `FLUX_BACKEND` — optional; `"local"` (default, runs FLUX.1-schnell via diffusers on this
+  machine's accelerator) or `"fal"` (calls a hosted fal.ai endpoint instead). Overrides
+  `prompts.yaml`'s `base.backend` field when set.
+- `FAL_KEY` — **required** if `FLUX_BACKEND=fal` (or `prompts.yaml`'s `base.backend: fal`);
+  read directly by the `fal_client` SDK, not by flux-gallery code.
 
 Disk usage: the worker retains the most recent 200 images per screen plus 200 full-wall
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`

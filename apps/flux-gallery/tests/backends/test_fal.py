@@ -8,7 +8,6 @@ import pytest
 pytest.importorskip("fal_client")
 
 import fal_client
-
 from flux_gallery.backends.fal import FalBackend
 
 
@@ -97,10 +96,15 @@ def test_generate_retries_after_a_billing_lock_error(monkeypatch):
 
 
 def test_generate_raises_after_exhausting_rate_limit_retries(monkeypatch):
+    from flux_gallery.backends.fal import FAL_MAX_RETRIES
+
     backend = FalBackend(endpoint="fal-ai/flux/schnell", num_inference_steps=4)
     monkeypatch.setattr("flux_gallery.backends.fal.time.sleep", lambda seconds: None)
 
+    calls = []
+
     def always_rate_limited(endpoint, arguments):
+        calls.append(1)
         raise _http_error(429, "Too Many Requests")
 
     with (
@@ -108,3 +112,27 @@ def test_generate_raises_after_exhausting_rate_limit_retries(monkeypatch):
         pytest.raises(fal_client.FalClientHTTPError),
     ):
         backend.generate("a prompt", 1600, 400)
+
+    assert len(calls) == FAL_MAX_RETRIES + 1
+
+
+def test_generate_does_not_retry_a_content_policy_rejection_as_billing_lock(monkeypatch):
+    backend = FalBackend(endpoint="fal-ai/flux/schnell", num_inference_steps=4)
+    monkeypatch.setattr("flux_gallery.backends.fal.time.sleep", lambda seconds: None)
+
+    calls = []
+
+    def blocked(endpoint, arguments):
+        calls.append(1)
+        raise _http_error(400, "Request blocked by content policy")
+
+    with (
+        patch("flux_gallery.backends.fal.fal_client.submit", side_effect=blocked),
+        pytest.raises(fal_client.FalClientHTTPError),
+    ):
+        backend.generate("a prompt", 1600, 400)
+
+    # A single call with no retries proves this was never misclassified as a
+    # billing lock -- with the pre-fix substring check, "blocked" matches
+    # "locked" and this would instead retry FAL_BILLING_MAX_RETRIES times.
+    assert len(calls) == 1

@@ -2,8 +2,9 @@ from unittest.mock import patch
 
 import pytest
 
-# flux_gallery.worker -> flux_generator -> torch, so without the flux-gallery extra
-# installed this file would fail at collection with a raw ModuleNotFoundError.
+# flux_gallery.worker -> backend_registry -> backends.local -> torch (and ->
+# backends.fal -> fal_client), so without the flux-gallery extra installed this
+# file would fail at collection with a raw ModuleNotFoundError.
 pytest.importorskip("torch")
 
 from flux_gallery.config import BaseGenerationConfig, PromptsConfig, ScreenPromptConfig
@@ -131,3 +132,8 @@ def test_validate_backend_selection_accepts_fal_with_fal_key_set():
 def test_validate_backend_selection_rejects_fal_without_fal_key():
     with pytest.raises(ValueError, match="FAL_KEY"):
         _validate_backend_selection("fal", {})
+
+
+def test_validate_backend_selection_rejects_fal_with_empty_fal_key():
+    with pytest.raises(ValueError, match="FAL_KEY"):
+        _validate_backend_selection("fal", {"FAL_KEY": ""})
