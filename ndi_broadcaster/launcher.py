@@ -230,7 +230,12 @@ def _validate_sck_display_mode(config: BroadcasterConfig) -> None:
 
 def _decode_raw_rgba_frame(width: int, height: int) -> Callable[[bytes], np.ndarray]:
     def decode(data: bytes) -> np.ndarray:
-        return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 4)
+        # np.frombuffer wraps the immutable `bytes` object directly, producing
+        # a read-only array -- confirmed live: cyndilib's write_data() needs a
+        # writable buffer and raises "buffer source array is read-only"
+        # without this copy. decode_captured_frame's np.array(pil_image) never
+        # hit this because PIL always allocates a fresh, writable array.
+        return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 4).copy()
 
     return decode
 

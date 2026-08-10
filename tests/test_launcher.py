@@ -13,6 +13,7 @@ from ndi_broadcaster.launcher import (
     REPO_ROOT,
     HealthCheckTimeoutError,
     _chrome_launch_args,
+    _decode_raw_rgba_frame,
     _LatestFrameSlot,
     _log_format,
     _sender_thread_loop,
@@ -230,6 +231,22 @@ def test_sender_thread_loop_uses_custom_decode_fn():
     assert calls == [b"\x01\x02\x03\x04"]
     assert len(sender.sent) >= 1
     assert np.array_equal(sender.sent[0], decoded)
+
+
+def test_decode_raw_rgba_frame_reshapes_and_returns_a_writable_array():
+    # Live-observed bug: np.frombuffer wraps the immutable `bytes` object
+    # directly, producing a read-only array. cyndilib's write_data() needs a
+    # writable buffer and raises "buffer source array is read-only" without
+    # an explicit copy -- this test pins that the returned array is writable,
+    # not just correctly shaped.
+    decode = _decode_raw_rgba_frame(width=2, height=1)
+    data = bytes([1, 2, 3, 4, 5, 6, 7, 8])
+
+    frame = decode(data)
+
+    assert frame.shape == (1, 2, 4)
+    assert frame.flags.writeable
+    assert np.array_equal(frame, np.array([[[1, 2, 3, 4], [5, 6, 7, 8]]], dtype=np.uint8))
 
 
 def test_latest_frame_slot_starts_empty():
