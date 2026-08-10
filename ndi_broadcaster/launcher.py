@@ -6,8 +6,10 @@ import contextlib
 import logging
 import os
 import platform
+import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,6 +99,7 @@ def _sender_thread_loop(
     sender: VideoSender,
     config: BroadcasterConfig,
     stop_event: threading.Event,
+    decode_fn: Callable[[bytes], np.ndarray] | None = None,
 ) -> None:
     """Decode and send frames off the event loop, at a steady clock.
 
@@ -104,7 +107,17 @@ def _sender_thread_loop(
     slow encode, a retry after an error), so a static/delayed wall must not stop NDI
     output entirely. Re-sending the last decoded frame holds the configured frame
     rate regardless of capture-loop timing.
+
+    decode_fn defaults to the cdp path's JPEG/PNG decode; the sck path passes a
+    lightweight raw-BGRA-to-RGBA reshape instead (see _decode_raw_rgba_frame),
+    since its frames already arrive as tightly packed RGBA bytes with no
+    compression to undo.
     """
+    decode = decode_fn or (
+        lambda data: decode_captured_frame(
+            data, target_width=config.width, target_height=config.height
+        )
+    )
     frame_interval = 1.0 / config.fps
     last_frame: np.ndarray | None = None
     next_deadline = time.monotonic()
@@ -118,9 +131,7 @@ def _sender_thread_loop(
         if data is not None:
             decode_start = time.monotonic()
             try:
-                last_frame = decode_captured_frame(
-                    data, target_width=config.width, target_height=config.height
-                )
+                last_frame = decode(data)
             except Exception:
                 logger.exception("Failed to decode a captured frame; skipping it")
             decodes_since_log += 1
@@ -192,6 +203,117 @@ def _chrome_launch_args() -> list[str]:
     if platform.system() == "Darwin":
         args.append("--use-angle=metal")
     return args
+
+
+SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
+
+
+def _validate_sck_display_mode(config: BroadcasterConfig) -> None:
+    """Fail at startup rather than mid-capture on a missing sck field.
+
+    Mirrors _validate_backend_selection's fail-fast convention in
+    flux-gallery's worker.py: a missing required field for the selected mode
+    is a config error, not something to guess at silently.
+    """
+    if config.capture_backend != "sck":
+        return
+    if config.sck_display_mode is None:
+        raise ValueError(
+            "capture_backend: sck requires sck_display_mode to be set to "
+            "'virtual' or 'physical'"
+        )
+    if config.sck_display_mode == "physical" and not config.sck_physical_display_name:
+        raise ValueError(
+            "sck_display_mode: physical requires sck_physical_display_name to be set"
+        )
+
+
+def _decode_raw_rgba_frame(width: int, height: int) -> Callable[[bytes], np.ndarray]:
+    def decode(data: bytes) -> np.ndarray:
+        return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 4)
+
+    return decode
+
+
+async def _capture_loop_sck(
+    config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
+) -> None:
+    # Imported lazily: capture_sck/virtual_display/physical_display all
+    # import PyObjC frameworks at module scope, which must not become a hard
+    # requirement for anyone running only the cdp backend.
+    from .capture_sck import SckCapture
+    from .physical_display import find_physical_display
+    from .virtual_display import ensure_helper_built, start_vdisplay_helper, wait_for_settled_bounds
+
+    vdisplay_proc: subprocess.Popen | None = None
+    if config.sck_display_mode == "virtual":
+        helper_dir = REPO_ROOT / "ndi_broadcaster" / "vdisplay_helper"
+        binary_path = ensure_helper_built(helper_dir)
+        vdisplay_proc, info = start_vdisplay_helper(
+            binary_path, config.width, config.height, config.sck_virtual_display_name
+        )
+        display = wait_for_settled_bounds(info.display_id, config.width, config.height)
+    else:
+        display = find_physical_display(config.sck_physical_display_name)
+
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=False,
+                args=[
+                    *_chrome_launch_args(),
+                    f"--window-position={display.x},{display.y}",
+                    f"--window-size={display.width},{display.height}",
+                    "--ignore-certificate-errors",
+                    "--disable-session-crashed-bubble",
+                    "--disable-infobars",
+                    "--noerrdialogs",
+                    "--no-first-run",
+                ],
+            )
+            context = await browser.new_context(
+                # no_viewport=True (not viewport=None) is what actually disables
+                # Playwright's forced 1280x720 default viewport, confirmed live
+                # during the proof-of-concept spike.
+                no_viewport=True,
+                ignore_https_errors=True,
+                permissions=["microphone"],
+            )
+            page = await context.new_page()
+            await page.goto(config.target_url)
+            # A framework-controlled, app-independent title: apps each set
+            # their own <title>, so SCShareableContent window matching can't
+            # rely on any single app's page title.
+            await page.evaluate(f"document.title = {SCK_WINDOW_TITLE!r}")
+
+            frame_slot = _LatestFrameSlot()
+            sender_thread = threading.Thread(
+                target=_sender_thread_loop,
+                args=(frame_slot, sender, config, stop_event),
+                kwargs={"decode_fn": _decode_raw_rgba_frame(config.width, config.height)},
+                daemon=True,
+            )
+            sender_thread.start()
+
+            capture = SckCapture(
+                SCK_WINDOW_TITLE, config.width, config.height, config.fps, on_frame=frame_slot.put
+            )
+            capture.start()
+            try:
+                while not stop_event.is_set():
+                    await asyncio.sleep(0.5)
+            finally:
+                capture.stop()
+                stop_event.set()
+                sender_thread.join(timeout=5.0)
+                await browser.close()
+    finally:
+        if vdisplay_proc is not None:
+            vdisplay_proc.terminate()
+            try:
+                vdisplay_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                vdisplay_proc.kill()
 
 
 async def _capture_loop(
@@ -314,11 +436,7 @@ def run(
 
     config = load_broadcaster_config(Path(config_path))
     config = resolve_target_url(config, env)
-    if config.capture_backend == "sck":
-        raise NotImplementedError(
-            "The 'sck' capture backend is not implemented yet; "
-            "set capture_backend: cdp in config/broadcaster.yaml"
-        )
+    _validate_sck_display_mode(config)
 
     wait_for_healthy(
         f"{config.target_url.rstrip('/')}/healthz", timeout_seconds=config.healthz_timeout_seconds
@@ -362,8 +480,9 @@ def run(
             )
 
         stop_event = threading.Event()
+        capture_loop = _capture_loop_sck if config.capture_backend == "sck" else _capture_loop
         try:
-            asyncio.run(_capture_loop(config, sender, stop_event))
+            asyncio.run(capture_loop(config, sender, stop_event))
         except KeyboardInterrupt:
             stop_event.set()
     finally:

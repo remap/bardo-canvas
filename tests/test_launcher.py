@@ -3,7 +3,9 @@ import platform
 import socketserver
 import textwrap
 import threading
+import time
 
+import numpy as np
 import pytest
 
 from ndi_broadcaster.config import BroadcasterConfig
@@ -13,6 +15,8 @@ from ndi_broadcaster.launcher import (
     _chrome_launch_args,
     _LatestFrameSlot,
     _log_format,
+    _sender_thread_loop,
+    _validate_sck_display_mode,
     resolve_launcher_paths,
     resolve_target_url,
     run,
@@ -108,7 +112,29 @@ def test_run_uses_overridden_target_url(tmp_path, monkeypatch):
     assert checked == ["https://localhost:9443/healthz"]
 
 
-def test_run_rejects_unimplemented_sck_backend(tmp_path, monkeypatch):
+def test_validate_sck_display_mode_noop_for_cdp():
+    _validate_sck_display_mode(BroadcasterConfig(capture_backend="cdp"))  # must not raise
+
+
+def test_validate_sck_display_mode_requires_mode():
+    with pytest.raises(ValueError, match="sck_display_mode"):
+        _validate_sck_display_mode(BroadcasterConfig(capture_backend="sck"))
+
+
+def test_validate_sck_display_mode_virtual_does_not_require_physical_name():
+    _validate_sck_display_mode(
+        BroadcasterConfig(capture_backend="sck", sck_display_mode="virtual")
+    )  # must not raise
+
+
+def test_validate_sck_display_mode_physical_requires_name():
+    with pytest.raises(ValueError, match="sck_physical_display_name"):
+        _validate_sck_display_mode(
+            BroadcasterConfig(capture_backend="sck", sck_display_mode="physical")
+        )
+
+
+def test_run_requires_sck_display_mode_when_backend_is_sck(tmp_path, monkeypatch):
     config_path = tmp_path / "broadcaster.yaml"
     config_path.write_text(
         textwrap.dedent("""
@@ -116,14 +142,94 @@ def test_run_rejects_unimplemented_sck_backend(tmp_path, monkeypatch):
             capture_backend: sck
         """)
     )
-    # If the backend check did not come first, run() would try to reach the network.
     monkeypatch.setattr(
         "ndi_broadcaster.launcher.wait_for_healthy",
-        lambda *args, **kwargs: pytest.fail("wait_for_healthy must not run for sck"),
+        lambda *args, **kwargs: pytest.fail("wait_for_healthy must not run when sck config is invalid"),
     )
 
-    with pytest.raises(NotImplementedError, match="sck"):
+    with pytest.raises(ValueError, match="sck_display_mode"):
         run(config_path=str(config_path))
+
+
+def test_run_requires_sck_physical_display_name_when_mode_is_physical(tmp_path, monkeypatch):
+    config_path = tmp_path / "broadcaster.yaml"
+    config_path.write_text(
+        textwrap.dedent("""
+            target_url: "https://localhost:8443/"
+            capture_backend: sck
+            sck_display_mode: physical
+        """)
+    )
+    monkeypatch.setattr(
+        "ndi_broadcaster.launcher.wait_for_healthy",
+        lambda *args, **kwargs: pytest.fail("wait_for_healthy must not run when sck config is invalid"),
+    )
+
+    with pytest.raises(ValueError, match="sck_physical_display_name"):
+        run(config_path=str(config_path))
+
+
+class _FakeSender:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, frame):
+        self.sent.append(frame)
+
+
+def test_sender_thread_loop_defaults_to_decode_captured_frame(monkeypatch):
+    calls = []
+
+    def fake_decode_captured_frame(data, target_width=None, target_height=None):
+        calls.append((data, target_width, target_height))
+        return np.zeros((1, 1, 4), dtype=np.uint8)
+
+    monkeypatch.setattr("ndi_broadcaster.launcher.decode_captured_frame", fake_decode_captured_frame)
+
+    frame_slot = _LatestFrameSlot()
+    frame_slot.put(b"fake-image-bytes")
+    sender = _FakeSender()
+    config = BroadcasterConfig(width=10, height=20)
+    stop_event = threading.Event()
+
+    thread = threading.Thread(
+        target=_sender_thread_loop, args=(frame_slot, sender, config, stop_event), daemon=True
+    )
+    thread.start()
+    time.sleep(0.1)
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    assert calls == [(b"fake-image-bytes", 10, 20)]
+
+
+def test_sender_thread_loop_uses_custom_decode_fn():
+    frame_slot = _LatestFrameSlot()
+    frame_slot.put(b"\x01\x02\x03\x04")
+    sender = _FakeSender()
+    config = BroadcasterConfig()
+    stop_event = threading.Event()
+    decoded = np.zeros((1, 1, 4), dtype=np.uint8)
+    calls = []
+
+    def fake_decode(data):
+        calls.append(data)
+        return decoded
+
+    thread = threading.Thread(
+        target=_sender_thread_loop,
+        args=(frame_slot, sender, config, stop_event),
+        kwargs={"decode_fn": fake_decode},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.1)
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    assert calls == [b"\x01\x02\x03\x04"]
+    assert len(sender.sent) >= 1
+    assert np.array_equal(sender.sent[0], decoded)
 
 
 def test_latest_frame_slot_starts_empty():
