@@ -26,11 +26,39 @@ let width = args.count > 1 ? Int(args[1]) ?? 3840 : 3840
 let height = args.count > 2 ? Int(args[2]) ?? 2160 : 2160
 let displayName = args.count > 3 ? args[3] : "Layout Driver Virtual Display"
 
-// Place the virtual display far to the right of any real display so its
-// coordinate space can never overlap the physical desktop, and so the
-// origin we hand to Chromium's --window-position is unambiguous.
-let desiredOriginX: Int32 = 5000
-let desiredOriginY: Int32 = 0
+// Place the virtual display just past the right edge of every currently
+// connected REAL display (computed fresh each run, not a fixed guess) so its
+// coordinate space can never overlap someone's actual multi-monitor desktop
+// arrangement, and so the origin we hand to Chromium's --window-position is
+// unambiguous. A fixed offset (e.g. always x=5000) would land inside a wide
+// or multi-display arrangement that extends past that point.
+func activeRealDisplayIDs() -> [CGDirectDisplayID] {
+    var displayCount: UInt32 = 0
+    CGGetActiveDisplayList(0, nil, &displayCount)
+    var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+    CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount)
+    return displayIDs
+}
+
+func computeVirtualDisplayOrigin() -> (Int32, Int32) {
+    let ids = activeRealDisplayIDs()
+    guard !ids.isEmpty else {
+        return (5000, 0)  // no displays reported (unexpected) -- arbitrary but safe fallback
+    }
+    var rightEdge: CGFloat = -CGFloat.greatestFiniteMagnitude
+    var topEdge: CGFloat = CGFloat.greatestFiniteMagnitude
+    for id in ids {
+        let bounds = CGDisplayBounds(id)
+        rightEdge = max(rightEdge, bounds.origin.x + bounds.size.width)
+        topEdge = min(topEdge, bounds.origin.y)
+    }
+    // Margin avoids any rounding/edge-adjacency ambiguity with the real desktop.
+    let margin: CGFloat = 100
+    return (Int32(rightEdge + margin), Int32(topEdge))
+}
+
+let (desiredOriginX, desiredOriginY) = computeVirtualDisplayOrigin()
+FileHandle.standardError.write("vdisplay_helper: real displays span up to x=\(desiredOriginX - 100); placing virtual display at (\(desiredOriginX), \(desiredOriginY))\n".data(using: .utf8)!)
 
 FileHandle.standardError.write("vdisplay_helper: creating \(width)x\(height) virtual display named \(displayName)\n".data(using: .utf8)!)
 

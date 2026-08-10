@@ -46,17 +46,22 @@ except ImportError as exc:  # pragma: no cover - exercised only off-macOS
     ) from exc
 
 
-def bgra_buffer_to_rgba_bytes(raw: bytes, width: int, height: int, bytes_per_row: int) -> bytes:
+def bgra_buffer_to_rgba_bytes(
+    raw: bytes, width: int, height: int, bytes_per_row: int, crop_top: int = 0
+) -> bytes:
     """Convert a raw BGRA CVPixelBuffer read (with possible row padding) into
-    tightly packed RGBA bytes of exactly (height, width, 4).
+    tightly packed RGBA bytes of exactly (height - crop_top, width, 4).
 
     Pure function, no PyObjC types -- testable with synthetic byte buffers.
     ScreenCaptureKit pixel buffers are frequently padded to a stride wider
     than width * 4 bytes; slicing by bytes_per_row before reshaping strips
-    that padding rather than corrupting the image with it.
+    that padding rather than corrupting the image with it. crop_top drops
+    that many rows off the top of the frame -- see launcher.py's
+    _CHROME_TOOLBAR_HEIGHT_PX for why this exists (trimming Chrome's own
+    tab-strip/address-bar out of the captured window).
     """
     arr = np.frombuffer(raw, dtype=np.uint8).reshape(height, bytes_per_row // 4, 4)
-    arr = arr[:, :width, [2, 1, 0, 3]]  # BGRA -> RGBA
+    arr = arr[crop_top:, :width, [2, 1, 0, 3]]  # BGRA -> RGBA, drop the top crop_top rows
     return np.ascontiguousarray(arr).tobytes()
 
 
@@ -112,11 +117,12 @@ def _wait_for_target_window(title_hint: str, timeout_s: float = 10.0, poll_inter
 
 
 class _StreamOutput(NSObject):
-    def initWithOnFrame_(self, on_frame: Callable[[bytes], None]):
+    def initWithOnFrame_cropTop_(self, on_frame: Callable[[bytes], None], crop_top: int):
         self = objc.super(_StreamOutput, self).init()
         if self is None:
             return None
         self._on_frame = on_frame
+        self._crop_top = crop_top
         self._frame_count = 0
         self._lock = threading.Lock()
         self._last_log = time.monotonic()
@@ -140,7 +146,9 @@ class _StreamOutput(NSObject):
             Quartz.CVPixelBufferUnlockBaseAddress(pixel_buffer, Quartz.kCVPixelBufferLock_ReadOnly)
 
         try:
-            self._on_frame(bgra_buffer_to_rgba_bytes(raw, width, height, bytes_per_row))
+            self._on_frame(
+                bgra_buffer_to_rgba_bytes(raw, width, height, bytes_per_row, self._crop_top)
+            )
         except Exception:
             logger.exception("SCK frame callback raised; dropping this frame")
 
@@ -170,12 +178,14 @@ class SckCapture:
         height: int,
         fps: int,
         on_frame: Callable[[bytes], None],
+        crop_top: int = 0,
     ) -> None:
         self._window_title_hint = window_title_hint
         self._width = width
         self._height = height
         self._fps = fps
         self._on_frame = on_frame
+        self._crop_top = crop_top
         self._stream = None
         self._output = None
 
@@ -186,13 +196,18 @@ class SckCapture:
 
         config = SCK.SCStreamConfiguration.alloc().init()
         config.setWidth_(self._width)
-        config.setHeight_(self._height)
+        # The captured window is crop_top pixels taller than the target
+        # resolution (Chrome's own toolbar) -- request its full native
+        # height here; _StreamOutput crops the extra rows off per frame.
+        config.setHeight_(self._height + self._crop_top)
         config.setMinimumFrameInterval_(CM.CMTimeMake(1, self._fps))
         config.setQueueDepth_(8)
         config.setShowsCursor_(False)
         config.setPixelFormat_(_BGRA_PIXEL_FORMAT)
 
-        self._output = _StreamOutput.alloc().initWithOnFrame_(self._on_frame)
+        self._output = _StreamOutput.alloc().initWithOnFrame_cropTop_(
+            self._on_frame, self._crop_top
+        )
         delegate = _StreamDelegate.alloc().init()
         self._stream = SCK.SCStream.alloc().initWithFilter_configuration_delegate_(
             content_filter, config, delegate

@@ -207,6 +207,25 @@ def _chrome_launch_args() -> list[str]:
 
 SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
 
+# Chrome's own tab-strip + address-bar height in a plain headed window (single
+# tab, no bookmarks bar) -- measured live via window.outerHeight minus
+# window.innerHeight, consistently 87px across repeated runs of this Chrome
+# version on macOS, for both Playwright's bundled Chrome for Testing and real
+# Chrome. --kiosk removes it cleanly, but was found, live, to force macOS's
+# native fullscreen Space transition for any borderless window sized to
+# exactly fill a display -- with "Displays have separate Spaces" off (System
+# Settings > Desktop & Dock > Mission Control, off by default on some Macs),
+# that transition visibly disrupts whatever's on the operator's other
+# displays, which is unacceptable for a background broadcaster process.
+# Requesting a window this many pixels taller than the target resolution,
+# then cropping that strip off the top of every captured frame (SckCapture's
+# crop_top), gets an exact-resolution capture with zero window-manager side
+# effects. If this ever drifts (a Chrome update changes the toolbar height),
+# the visible symptom is a thin sliver of toolbar or black bar at the very
+# top of the captured image -- remeasure via outerHeight - innerHeight in a
+# real headed launch and update this constant.
+_CHROME_TOOLBAR_HEIGHT_PX = 87
+
 
 def _validate_sck_display_mode(config: BroadcasterConfig) -> None:
     """Fail at startup rather than mid-capture on a missing sck field.
@@ -268,7 +287,12 @@ async def _capture_loop_sck(
                 args=[
                     *_chrome_launch_args(),
                     f"--window-position={display.x},{display.y}",
-                    f"--window-size={display.width},{display.height}",
+                    # Requested taller than the target resolution to compensate
+                    # for Chrome's own tab-strip/address-bar height -- see
+                    # _CHROME_TOOLBAR_HEIGHT_PX. SckCapture crops that many rows
+                    # off the top of every captured frame, so the delivered
+                    # frame is still exactly config.width x config.height.
+                    f"--window-size={display.width},{display.height + _CHROME_TOOLBAR_HEIGHT_PX}",
                     "--ignore-certificate-errors",
                     "--disable-session-crashed-bubble",
                     "--disable-infobars",
@@ -301,7 +325,12 @@ async def _capture_loop_sck(
             sender_thread.start()
 
             capture = SckCapture(
-                SCK_WINDOW_TITLE, config.width, config.height, config.fps, on_frame=frame_slot.put
+                SCK_WINDOW_TITLE,
+                config.width,
+                config.height,
+                config.fps,
+                on_frame=frame_slot.put,
+                crop_top=_CHROME_TOOLBAR_HEIGHT_PX,
             )
             capture.start()
             try:
