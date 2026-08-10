@@ -22,7 +22,10 @@ FAL_BILLING_MAX_RETRIES = 6
 FAL_BILLING_BACKOFF_BASE = 30.0
 FAL_BILLING_BACKOFF_MAX = 300.0
 
-_BILLING_LOCK_PATTERN = re.compile(r"\b(locked|exhausted|balance|suspended)\b")
+# Lookaround rather than \b: fal.ai error bodies sometimes use snake_case codes
+# (e.g. "insufficient_balance"), and \b treats "_" as a word character, which
+# would miss those while still (correctly) excluding "blocked".
+_BILLING_LOCK_PATTERN = re.compile(r"(?<![a-z])(locked|exhausted|balance|suspended)(?![a-z])")
 
 
 def _is_billing_lock(exc: fal_client.FalClientHTTPError) -> bool:

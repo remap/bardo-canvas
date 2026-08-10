@@ -2,10 +2,12 @@ from unittest.mock import patch
 
 import pytest
 
-# flux_gallery.worker -> backend_registry -> backends.local -> torch (and ->
-# backends.fal -> fal_client), so without the flux-gallery extra installed this
-# file would fail at collection with a raw ModuleNotFoundError.
+# flux_gallery.worker -> backend_registry -> backends.local -> torch, diffusers
+# (and -> backends.fal -> fal_client), so without the flux-gallery extra installed
+# this file would fail at collection with a raw ModuleNotFoundError.
 pytest.importorskip("torch")
+pytest.importorskip("diffusers")
+pytest.importorskip("fal_client")
 
 from flux_gallery.config import BaseGenerationConfig, PromptsConfig, ScreenPromptConfig
 from flux_gallery.worker import (

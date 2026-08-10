@@ -104,7 +104,8 @@ GEMINI_API_KEY=... apps/flux-gallery/run.sh
   machine's accelerator) or `"fal"` (calls a hosted fal.ai endpoint instead). Overrides
   `prompts.yaml`'s `base.backend` field when set.
 - `FAL_KEY` — **required** if `FLUX_BACKEND=fal` (or `prompts.yaml`'s `base.backend: fal`);
-  read directly by the `fal_client` SDK, not by flux-gallery code.
+  flux-gallery only checks it's present at startup, then leaves the `fal_client` SDK to
+  read its actual value from the environment.
 
 Disk usage: the worker retains the most recent 200 images per screen plus 200 full-wall
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`

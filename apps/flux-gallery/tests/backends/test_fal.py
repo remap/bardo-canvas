@@ -136,3 +136,30 @@ def test_generate_does_not_retry_a_content_policy_rejection_as_billing_lock(monk
     # billing lock -- with the pre-fix substring check, "blocked" matches
     # "locked" and this would instead retry FAL_BILLING_MAX_RETRIES times.
     assert len(calls) == 1
+
+
+def test_generate_retries_a_snake_case_billing_error_code(monkeypatch):
+    # fal.ai error bodies sometimes carry a machine-readable code like this
+    # instead of prose. "_" is not a word-boundary character, so a naive \b
+    # regex would miss this while still (correctly) excluding "blocked".
+    backend = FalBackend(endpoint="fal-ai/flux/schnell", num_inference_steps=4)
+    handle = _handle_returning({"images": [{"url": "https://fal.example/image.png"}]})
+    monkeypatch.setattr("flux_gallery.backends.fal.time.sleep", lambda seconds: None)
+
+    calls = []
+
+    def flaky_submit(endpoint, arguments):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http_error(400, "insufficient_balance")
+        return handle
+
+    with (
+        patch("flux_gallery.backends.fal.fal_client.submit", side_effect=flaky_submit),
+        patch("flux_gallery.backends.fal.httpx.get") as get,
+    ):
+        get.return_value = MagicMock(content=b"image-bytes")
+        result = backend.generate("a prompt", 1600, 400)
+
+    assert result == b"image-bytes"
+    assert len(calls) == 2
