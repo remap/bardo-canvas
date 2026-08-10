@@ -274,6 +274,48 @@ def test_sender_thread_loop_applies_timecode_overlay_when_enabled():
     assert not np.array_equal(sender.sent[0][:100, :], clean_reference[:100, :])
 
 
+def test_sender_thread_loop_timecode_does_not_drift_across_repeated_sends(monkeypatch):
+    # Integration-level guard for the snapshot()/apply() split: snapshot()
+    # must run ONLY in the "a new frame was just decoded" branch of
+    # _sender_thread_loop, never in the "repeated/stale frame" send branch.
+    # test_timecode_overlay.py's own repeated-apply test proves TimecodeOverlay
+    # itself doesn't compound blends, but says nothing about whether the loop
+    # actually calls snapshot() at the right place -- if someone later moved
+    # the snapshot() call next to apply() (both in the send block), that unit
+    # test would stay green while live output silently drifted whiter on
+    # every static/repeated frame. Here, only one frame ever arrives, so most
+    # of the loop's sends are "repeated/stale frame" sends, not fresh decodes.
+    times = iter([100.0] * 200)  # frozen instant; large pool since both
+    # TimecodeOverlay.apply() and _sender_thread_loop's own pacing logic call
+    # time.monotonic() every loop iteration
+    monkeypatch.setattr("ndi_broadcaster.timecode_overlay.time.monotonic", lambda: next(times))
+
+    frame_slot = _LatestFrameSlot()
+    frame_slot.put(b"\x01\x02\x03\x04")  # only one frame ever arrives
+    sender = _FakeSender()
+    config = BroadcasterConfig(timecode_enabled=True, width=800, height=600, fps=30)
+    stop_event = threading.Event()
+    decoded = np.full((600, 800, 4), 100, dtype=np.uint8)
+
+    thread = threading.Thread(
+        target=_sender_thread_loop,
+        args=(frame_slot, sender, config, stop_event),
+        kwargs={"decode_fn": lambda data: decoded},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.15)
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    assert len(sender.sent) >= 2
+    first_send = sender.sent[0].copy()
+    # sender.sent holds references to the SAME mutated `decoded` object across
+    # every send, so compare a snapshot taken right after send 1 (via .copy())
+    # against the object's state after all sends complete.
+    assert np.array_equal(first_send, sender.sent[-1])
+
+
 def test_sender_thread_loop_skips_timecode_overlay_when_disabled():
     frame_slot = _LatestFrameSlot()
     frame_slot.put(b"\x01\x02\x03\x04")
@@ -281,6 +323,7 @@ def test_sender_thread_loop_skips_timecode_overlay_when_disabled():
     config = BroadcasterConfig(timecode_enabled=False)
     stop_event = threading.Event()
     decoded = np.zeros((1, 1, 4), dtype=np.uint8)
+    clean_reference = decoded.copy()
 
     thread = threading.Thread(
         target=_sender_thread_loop,
@@ -294,7 +337,12 @@ def test_sender_thread_loop_skips_timecode_overlay_when_disabled():
     thread.join(timeout=2.0)
 
     assert len(sender.sent) >= 1
-    assert np.array_equal(sender.sent[0], decoded)
+    # _FakeSender.send() stores frames by reference, so sender.sent[0] and
+    # `decoded` are the same object -- comparing against it directly can
+    # never fail regardless of whether the overlay ran. Comparing against an
+    # independent copy taken before the thread ran actually exercises the
+    # disabled path (mirrors clean_reference in the enabled-path test above).
+    assert np.array_equal(sender.sent[0], clean_reference)
 
 
 def test_decode_raw_rgba_frame_reshapes_and_returns_a_writable_array():

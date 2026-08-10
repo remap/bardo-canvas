@@ -60,6 +60,24 @@ def test_timecode_overlay_bottom_position_only_touches_the_bottom_strip():
     assert not np.array_equal(frame[1960:, :], np.full((200, 3840, 4), 100, dtype=np.uint8))
 
 
+def test_timecode_overlay_apply_does_not_alter_the_alpha_channel():
+    # Live-observed bug: cv2.putText does not treat channel 3 as a normal
+    # color to blend on a 4-channel image -- it writes glyph antialiasing
+    # coverage directly into alpha (an edge pixel's alpha can drop from 255
+    # to 6). After the 0.5 addWeighted blend, alpha in the overlay region
+    # ended up in the 128-255 range instead of staying uniformly opaque.
+    # Since VideoSender sends FourCC.RGBA and every real decoder produces
+    # fully-opaque frames, this overlay must never introduce alpha variation.
+    overlay = TimecodeOverlay(enabled=True, position="top", width=3840, height=2160, fps=30)
+    frame = np.full((2160, 3840, 4), 100, dtype=np.uint8)
+    frame[:, :, 3] = 255
+
+    overlay.snapshot(frame)
+    overlay.apply(frame)
+
+    assert np.all(frame[:200, :, 3] == 255)
+
+
 def test_timecode_overlay_repeated_apply_does_not_compound_the_blend(monkeypatch):
     # GOTCHA this guards against: _sender_thread_loop re-sends the same frame
     # object, unmodified, whenever nothing new has been captured. If apply()

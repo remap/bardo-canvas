@@ -100,3 +100,14 @@ class TimecodeOverlay:
         # non-contiguous slice of `frame` (rows and columns both sliced), and
         # this is the portable way to write a computed array back into it.
         region[:] = cv2.addWeighted(overlay, _BLEND_ALPHA, region, 1 - _BLEND_ALPHA, 0)
+        # cv2.putText does not treat channel 3 as a normal color to blend on a
+        # 4-channel image -- confirmed live: it writes glyph antialiasing
+        # coverage directly into alpha (e.g. an edge pixel's alpha drops from
+        # 255 to 6), so after the addWeighted blend above, alpha in this
+        # region ends up in the 128-255 range instead of uniform 255. Since
+        # VideoSender sends FourCC.RGBA and every real decoder here produces
+        # fully-opaque frames, this overlay would otherwise be the only
+        # source of alpha variation in the whole NDI output -- restoring
+        # alpha from the pre-overlay clean patch keeps RGB blended while
+        # alpha stays exactly what it was before the overlay touched it.
+        region[:, :, 3] = self._clean_patch[:, :, 3]
