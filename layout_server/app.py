@@ -88,6 +88,7 @@ def create_app(
         "geometry.js",
         "device-match.js",
         "backoff.js",
+        "screenshot-worker.js",
     ):
         app.get(f"/{framework_js_filename}")(_framework_js_route(framework_js_filename))
 

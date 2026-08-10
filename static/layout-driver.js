@@ -253,8 +253,49 @@ export function enableScreenshotResponder(driver) {
     return offscreen;
   }
 
+  // The screenshot responder composites and PNG-encodes in screenshot-worker.js,
+  // not via compositeToCanvas() above -- see that file for why (a real,
+  // live-observed ScreenCaptureKit capture stall). compositeToCanvas() itself
+  // stays exactly as it was for __ndiCaptureDataURL()'s unrelated, unchanged
+  // cdp-path use below.
+  const screenshotWorker = new Worker(new URL("./screenshot-worker.js", import.meta.url));
+  let nextScreenshotRequestId = 0;
+  const pendingScreenshotRequests = new Map();
+  screenshotWorker.onmessage = (event) => {
+    const { requestId, blob } = event.data;
+    const resolve = pendingScreenshotRequests.get(requestId);
+    if (resolve) {
+      pendingScreenshotRequests.delete(requestId);
+      resolve(blob);
+    }
+  };
+
   async function composite() {
-    return new Promise((resolve) => compositeToCanvas().toBlob(resolve, "image/png"));
+    const placements = computeCompositePlacements(driver.layoutConfig.screens);
+    // createImageBitmap() snapshots each canvas's current pixel buffer without
+    // synchronously reading it on the main thread -- the actual compositing draw
+    // calls and PNG encode happen in the worker, off pixel data transferred here
+    // at zero copy cost.
+    const bitmaps = await Promise.all(
+      placements.map((placement) => {
+        const canvas = findCanvas(placement.id);
+        return canvas ? createImageBitmap(canvas) : null;
+      })
+    );
+
+    const requestId = nextScreenshotRequestId++;
+    const result = new Promise((resolve) => pendingScreenshotRequests.set(requestId, resolve));
+    screenshotWorker.postMessage(
+      {
+        requestId,
+        width: driver.layoutConfig.canvas.width,
+        height: driver.layoutConfig.canvas.height,
+        placements,
+        bitmaps,
+      },
+      bitmaps.filter((bitmap) => bitmap !== null)
+    );
+    return result;
   }
 
   // Exposed for the NDI broadcaster to read directly via page.evaluate() -- CDP's own

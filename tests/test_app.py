@@ -57,3 +57,9 @@ def test_get_backoff_js(client):
     response = client.get("/backoff.js")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
+
+
+def test_get_screenshot_worker_js(client):
+    response = client.get("/screenshot-worker.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
