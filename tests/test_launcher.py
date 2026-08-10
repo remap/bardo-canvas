@@ -208,7 +208,12 @@ def test_sender_thread_loop_uses_custom_decode_fn():
     frame_slot = _LatestFrameSlot()
     frame_slot.put(b"\x01\x02\x03\x04")
     sender = _FakeSender()
-    config = BroadcasterConfig()
+    # timecode_enabled=False: this test's degenerate 1x1 `decoded` frame is
+    # only meant to exercise decode_fn wiring, not the overlay -- with the
+    # default (enabled) config, TimecodeOverlay.apply()'s region would fall
+    # entirely outside a 1x1 frame and cv2.putText would raise on the
+    # resulting zero-size slice.
+    config = BroadcasterConfig(timecode_enabled=False)
     stop_event = threading.Event()
     decoded = np.zeros((1, 1, 4), dtype=np.uint8)
     calls = []
@@ -229,6 +234,65 @@ def test_sender_thread_loop_uses_custom_decode_fn():
     thread.join(timeout=2.0)
 
     assert calls == [b"\x01\x02\x03\x04"]
+    assert len(sender.sent) >= 1
+    assert np.array_equal(sender.sent[0], decoded)
+
+
+def test_sender_thread_loop_applies_timecode_overlay_when_enabled():
+    # width/height=800x600 (not a degenerate 1x1) is deliberate: the overlay
+    # region has fixed margins (edge_margin_px=32 on each side) regardless of
+    # frame size, so a too-small frame could make cv2.putText/addWeighted
+    # operate on a zero-size slice and raise -- caught by _sender_thread_loop's
+    # own try/except around the send block, which would make sender.send()
+    # silently never run and this test's "at least one send happened"
+    # assertion fail for a reason unrelated to what it's supposed to check.
+    # 800x600 is comfortably larger than the overlay's rendered region.
+    frame_slot = _LatestFrameSlot()
+    frame_slot.put(b"\x01\x02\x03\x04")
+    sender = _FakeSender()
+    config = BroadcasterConfig(timecode_enabled=True, width=800, height=600)
+    stop_event = threading.Event()
+    decoded = np.full((600, 800, 4), 100, dtype=np.uint8)
+    clean_reference = decoded.copy()
+
+    thread = threading.Thread(
+        target=_sender_thread_loop,
+        args=(frame_slot, sender, config, stop_event),
+        kwargs={"decode_fn": lambda data: decoded},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.1)
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    assert len(sender.sent) >= 1
+    # TimecodeOverlay mutates `decoded` in place (it's the same object
+    # `sender.sent` holds references to), so compare against the independent
+    # clean_reference copy taken before the thread ran -- proves the real
+    # TimecodeOverlay (not a stub) actually drew something in the top strip.
+    assert not np.array_equal(sender.sent[0][:100, :], clean_reference[:100, :])
+
+
+def test_sender_thread_loop_skips_timecode_overlay_when_disabled():
+    frame_slot = _LatestFrameSlot()
+    frame_slot.put(b"\x01\x02\x03\x04")
+    sender = _FakeSender()
+    config = BroadcasterConfig(timecode_enabled=False)
+    stop_event = threading.Event()
+    decoded = np.zeros((1, 1, 4), dtype=np.uint8)
+
+    thread = threading.Thread(
+        target=_sender_thread_loop,
+        args=(frame_slot, sender, config, stop_event),
+        kwargs={"decode_fn": lambda data: decoded},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.1)
+    stop_event.set()
+    thread.join(timeout=2.0)
+
     assert len(sender.sent) >= 1
     assert np.array_equal(sender.sent[0], decoded)
 
