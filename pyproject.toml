@@ -14,7 +14,6 @@ dependencies = [
     "httpx>=0.27",
     "cryptography>=43.0",
     "numpy>=2.1",
-    "opencv-python-headless>=5.0.0",
     "pyobjc-core>=10.3; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa>=10.3; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10.3; sys_platform == 'darwin'",
