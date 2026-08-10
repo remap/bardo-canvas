@@ -112,11 +112,16 @@ Disk usage: the worker retains the most recent 200 images per screen plus 200 fu
 (gitignored).
 
 **Known limitation:** NDI capture fps degrades steadily while this worker is running
-(not while idle), down to single digits within a couple of minutes. Confirmed root
-cause: `disk_history.save_and_prune`'s own file-write volume/frequency (not Flux, not
-GPU, not the NDI SDK, not which image-generation backend is selected) — writing this
-much data this often competes with the broadcaster's own capture pipeline for system
-I/O. Not yet fixed; see framework spec §3.4a.
+(not while idle), down to single digits within a couple of minutes, independent of
+disk I/O, Flux/GPU, or which image-generation backend is selected. Confirmed root
+cause: Playwright's own Node.js driver process, which the `cdp` capture backend
+depends on for every `page.evaluate()` call, accumulates unreleased state under
+sustained high-frequency use — a documented, years-old, externally unresolved
+Playwright limitation (not a bug in this repo), described in
+[microsoft/playwright#15400](https://github.com/microsoft/playwright/issues/15400).
+The fix in progress is a `sck` capture backend (macOS ScreenCaptureKit) that removes
+Playwright's driver from the sustained capture path entirely; see framework spec
+§3.4a for the full investigation and citations.
 
 ## Performance and correctness: how NDI capture actually works
 

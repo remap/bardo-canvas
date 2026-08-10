@@ -142,10 +142,10 @@ If `audio.yaml` has `enabled: false`, or a configured device name isn't found in
     5. `HeadlessExperimental.beginFrame` (with `--enable-begin-frame-control --run-all-compositor-stages-before-draw`), Chromium's own documented mechanism for deterministic single-frame-at-a-time headless capture — the method doesn't exist at all in this Chromium version's full-browser binary (`'HeadlessExperimental.beginFrame' wasn't found`) and hangs indefinitely via the separate `chrome-headless-shell` binary Playwright selects for headless launches. Effectively removed/unusable in current Chromium.
     6. Root cause, found by direct comparison: every attempt above shared the same failure — a canvas's own `ctx.getImageData()` showed correct, valid pixel data (a pushed solid-color test image) at the exact coordinates a same-instant CDP screenshot showed `(0, 0, 0)`, reproduced with and without GPU acceleration and across both Chromium binaries. This matches a long-documented class of Chromium/Puppeteer/Playwright bug (e.g. `puppeteer/puppeteer#5352`): canvas content that's valid and readable from the page's own JS does not reliably reach Chromium's viewport-level screenshot/screencast capture pipeline. The actual fix sidesteps every CDP screenshot API entirely: `window.__ndiCaptureDataURL()` (`static/layout-driver.js`) composites the same canvases with plain `ctx.drawImage()` and reads the result back with the *canvas's own* `toDataURL()` — proven reliable throughout the investigation. `page.evaluate()` runs this over the same CDP connection Playwright already holds to drive the browser it launched; there is no HTTP server and no network round trip in the 30fps capture loop, only a direct call into the one page already under Playwright's control (the same mechanism used for every other `page.evaluate()` call in this codebase).
     7. That fix alone still failed under sustained load: `compositeToCanvas()` originally called `document.createElement('canvas')` on every single invocation — harmless at its original call rate (at most once per `screenshot_request`, i.e. rare), but at up to `config.fps` calls/sec sustained for minutes, a fresh GPU-backed canvas allocated 30 times a second and never reused leaked badly enough to reproduce both of the above failure modes by a different route: a slow climb in capture latency under Metal (GPU resources exhausted gradually) and an outright renderer crash after about 30 seconds under SwiftShader (`Page.evaluate: Target crashed`, software-side allocation exhausted faster). The fix was to allocate the offscreen canvas once, outside the per-call function, and reuse it every capture — the same pattern already used correctly everywhere else in this codebase for canvases that live for the page's lifetime.
-    Paced to `config.fps` via the same deadline-based clock used elsewhere. Verified live with extended runs on both sample apps after the fix: noraebang (continuously-animating p5 sketches, a much higher sustained encode rate since every frame's content is genuinely different) held a stable ~13–16fps indefinitely, with no degradation trend. flux-gallery held a clean ~29–30fps indefinitely *while idle*, but degrades once its worker starts writing to disk — see §3.4a for the confirmed root cause.
+    Paced to `config.fps` via the same deadline-based clock used elsewhere. Verified live with extended runs on both sample apps after the fix: noraebang (continuously-animating p5 sketches, a much higher sustained encode rate since every frame's content is genuinely different) held a stable ~13–16fps indefinitely, with no degradation trend. flux-gallery held a clean ~29–30fps indefinitely *while idle*, but degrades once its worker starts pushing real generated images — see §3.4a for the confirmed root cause and the chosen fix.
   - `sck`: macOS ScreenCaptureKit via PyObjC, raw BGRA frames matched by window title. Needs Screen Recording permission and a headed display (physical or dummy plug) attached. Opt-in for deployments that need the extra performance/quality at sustained 4K30.
 
-### 3.4a Known limitation: flux-gallery-specific NDI capture degradation, caused by its own disk-history writes
+### 3.4a Known limitation: NDI capture degradation, caused by using Playwright outside its design envelope
 
 Running flux-gallery's worker alongside the broadcaster causes NDI capture fps to
 degrade steadily and indefinitely — starting around 28–30fps, declining over
@@ -190,46 +190,127 @@ with noraebang-generative, and with synthetic repros below) are unaffected.
     on the same cadence as the real worker, pushing a static test image with
     no disk writes, held a clean ~30fps through 17 real API calls over 2
     minutes).
+13. **Disk I/O volume/frequency** (`disk_history.save_and_prune`, called twice
+    per worker cycle). This looked confirmed for a time — a repro doing real
+    `GeminiExpander` calls plus real file writes (~1-2MB PNGs, the real
+    directory-listing-and-prune logic), with **zero** Flux/FAL/MPS involvement,
+    reproduced the exact degradation curve, and repeating it with the write
+    target moved to `/tmp` (outside the Dropbox-synced repo tree) made no
+    difference. But disabling `disk_history`'s writes entirely in the real
+    worker (FAL backend, real cadence) **did not fix the degradation** — it
+    degraded identically with zero disk writes. The disk-I/O repro's real flaw:
+    it also pushed genuinely complex, freshly-generated image content on every
+    cycle, which turned out to be the actual confound (item 14).
+14. Chrome's own `willReadFrequently` canvas-optimization heuristic (which can
+    silently switch a frequently-read `<canvas>` from GPU-accelerated to
+    CPU-backed rendering — a real, documented Chromium behavior, see citations
+    below) — tested directly by explicitly setting
+    `getContext("2d", { willReadFrequently: true })` on the offscreen
+    compositing canvas in `static/layout-driver.js`. No measurable effect;
+    reverted.
 
 Native profiling (macOS `sample`, corroborated by `py-spy`) had pointed at
 `cyndilib`'s `_send_video_async` spending nearly all its time inside a
 `sleep_for()` in `libndi.dylib` (Vizrt's closed-source NDI runtime), and for a
-time this was believed to be the root cause with the actual trigger
-unidentified. That conclusion was **wrong** — see below.
+time this was believed to be the root cause. That was also **wrong** — the
+sender thread's own logged `send()` timing (already emitted every 5s) shows
+only a modest ~1.5-1.8x slowdown (14-16ms → 21-26ms) that plateaus, nowhere
+near the 10-15x collapse in the actual symptom (capture latency: 30ms →
+100-500ms). The profiling wasn't fabricated — `send()` genuinely is a large
+fraction of the sender thread's own per-frame budget even at baseline (14ms of
+a 33ms budget), so it dominates a profile of *that thread* — but that's a
+different claim from "the NDI SDK call is what's slow," and the sender
+thread's own send-call *rate* never drops even while fully degraded (still
+~30/s, confirmed from logs), meaning the real NDI network output never stops;
+it just repeats stale frames. All 10-15x of the actual magnitude lives
+upstream, in the capture loop's `page.evaluate()` round trip.
 
-**Root cause, confirmed:** flux-gallery's own `disk_history.save_and_prune`,
-called twice per worker cycle (once for the per-screen image, once for the
-full-wall screenshot), regardless of which image-generation backend produced
-the bytes. A repro that ran real `GeminiExpander` calls plus real file writes
-(realistic ~1-2MB PNGs, `save_and_prune`'s real directory-listing-and-prune
-logic, same cadence as the real worker) into `apps/flux-gallery/output/` — with
-**zero** Flux/FAL/MPS involvement — reproduced the exact degradation curve
-(30fps collapsing to under 2fps within two minutes, even faster than the real
-worker's collapse). Repeating that repro with the write target moved to `/tmp`
-(outside the Dropbox-synced repo tree entirely) produced the same collapse,
-ruling out Dropbox/iCloud/file-provider-extension interception (§3.4a item 5's
-finding was correct that Dropbox-specific exclusion doesn't help, but for the
-wrong reason — it was never about Dropbox being *aware* of the writes, just
-their volume and frequency). This machine also runs Google Drive's own
-File Provider sync daemon (`DriveFS`) system-wide, a plausible contributor to
-general file-provider-extension overhead independent of which directory is
-written to, though the `/tmp` repro shows the effect isn't Dropbox-specific
-regardless of that daemon's role.
+**Trigger, confirmed via clean isolation:** pushing a genuinely complex
+(photographic) image to a screen while `page.evaluate()`-based capture runs,
+independent of what produced that image. A repro with **zero** network calls,
+zero Gemini, zero disk writes, zero torch import — a two-line loop pushing the
+same static real photo over HTTP every 2 seconds — reproduced the identical
+degradation, with the fastest onset of any test (already degraded within 15
+seconds). Simple synthetic images (solid colors) never trigger it at any push
+rate tested.
 
-This fully explains every item in the ruled-out list above: the local and FAL
-backends both call `disk_history.save_and_prune` identically (item order/
-timing aside), so of course they degraded the same way; every synthetic repro
-that stayed clean (items 7-9, 12) never wrote a realistic volume of data to
-disk in a loop; excluding the output directory from Dropbox/Spotlight (item 5)
-never addressed the actual mechanism; and killing the worker or recycling the
-browser (items 3-4, 10-11) couldn't help because the contention is genuine
-system-wide I/O pressure from a **separate process** (the worker), not
-anything wrong in the broadcaster's own code, thread, or NDI send call.
+**Root mechanism, confirmed via external documentation:** Playwright's own
+Node.js driver process — the persistent process that bridges Python calls to
+Chromium over CDP, sitting underneath every `page.evaluate()` call — is
+[documented by Playwright's own maintainers](https://github.com/microsoft/playwright/issues/15400)
+to accumulate unreleased per-context/per-call state, because Playwright is
+designed for short-lived, per-test sessions that get closed and thrown away in
+seconds to minutes, not sustained, multi-hour, high-frequency automation. From
+that thread (still open, with a comment dated 2026 confirming it's still
+happening): "*Playwright is focused on testing scenarios, where contexts are
+constantly closed and re-opened on a per-test basis... If the context is not
+closed, then all the debugging metadata is piling up*" — and a separate
+commenter's direct measurement found that even properly closing and recreating
+contexts only *delays* the growth; only killing the Node process itself clears
+it. This directly explains the one asymmetry nothing else did: browser/context
+recycling (`BROWSER_RECYCLE_INTERVAL_SECONDS`, item 4) never fixed the
+degradation because it leaves the same underlying Node driver process alive
+across recycles; a full restart of `ndi_broadcaster.launcher` fixes it
+instantly because that's the only thing that kills the driver process too. It
+also explains the content-complexity correlation: more data marshaled through
+more `page.evaluate()` calls (a larger base64 data-URL payload for a real
+photo vs. a trivial one for a solid color) means faster accumulation. This is
+a well-known, years-old, **externally unresolved** Playwright limitation — not
+a bug in our code, `libndi.dylib`, disk I/O, Dropbox, or Chrome's canvas
+rendering heuristics. Using Playwright/CDP for a sustained 30fps capture loop
+for hours at a time is fundamentally outside what the tool is built for.
 
-**Not yet done:** implementing a fix (e.g. reducing `disk_history` write
-frequency/size, lowering `HISTORY_KEEP`, or moving history storage to a
-ramdisk/tmpfs) and re-verifying live. This is a real, actionable fix — unlike
-the earlier (incorrect) "closed-source vendor SDK, can't fix" conclusion.
+**Chosen path forward — two independently validated approaches, complementary
+rather than competing:**
+
+1. **Replace the capture mechanism with macOS ScreenCaptureKit (SCK)**,
+   decoupling the 30fps pixel pump from Playwright's Node driver entirely
+   (Playwright is kept only for page load/control, which is exactly the kind
+   of short-lived operation it's designed for). SCK needs a real, headed,
+   on-screen window; the target 3840×2160 doesn't fit the built-in display on
+   the current dev machine, so a proof of concept validated creating a fully
+   virtual (software-only, no physical hardware) display via the private
+   `CGVirtualDisplay` API — the same one used by open-source tools
+   [DeskPad](https://github.com/Stengo/DeskPad) and
+   [BetterDisplay](https://github.com/waydabber/BetterDisplay) — as a compiled
+   Swift CLI helper. Confirmed end to end: a headed Chromium window placed on
+   that virtual display reached the true, unclamped 3840×2160 size (verified
+   three independent ways), and `SCStream` delivered real, continuously
+   changing content at a sustained ~29.3fps average over a 5-minute run (8804
+   frames, 296/296 sampled frames distinct — zero repeats). Full spike
+   writeup, code, and five specific WindowServer/AppKit timing gotchas (mode
+   selection races, origin placement, `NSScreen` cache staleness, a
+   `CGS_REQUIRE_INIT` crash) are preserved for implementation reference. Not
+   yet validated: multi-hour endurance (only a 5-minute run was done).
+2. **Decouple the NDI sender from the capture process entirely**, via two
+   separate OS processes connected by a local Unix domain socket, so that
+   restarting the capture side (whether on a timer, pre-emptively, or after a
+   crash) never touches the sender's live NDI connection. A separate proof of
+   concept validated this over a 33-minute run: an independent NDI receiver
+   script (not trusting the sender's own bookkeeping) recorded ~59,000 real
+   frames with zero gap events through 9 scripted capture-process restarts
+   *and* an unplanned ~2.5-minute outage, with a measured restart-to-fresh-frame
+   latency of 416-588ms (mean 532ms) — during which the sender repeats the
+   last known frame (a brief freeze, not a dropped connection or black
+   screen) rather than a real interruption. The same 18-minute run against
+   noraebang's continuous p5.js content showed no degradation trend, though
+   the PoC report is explicit that 18 minutes doesn't rule out a slower decline
+   over the multi-hour sessions where the original degradation was observed.
+   This pattern is a straightforward extension of `_LatestFrameSlot`'s
+   existing "repeat the last frame rather than stall" design across a process
+   boundary instead of a thread boundary, and remains useful as a safety net
+   around approach 1's own capture-process restarts/failures, independent of
+   which capture mechanism is in use. Not yet implemented in the real
+   framework.
+
+Investigation citations: [microsoft/playwright#15400](https://github.com/microsoft/playwright/issues/15400)
+(the confirmed root mechanism); [Chromium issue 40502896](https://issues.chromium.org/issues/40502896)
+("`context.drawImage()` slows down massively when drawing a few large
+images" — a real, documented Chromium bug matching the symptom shape,
+investigated as a candidate mechanism alongside `willReadFrequently` before
+the Playwright driver explanation was found; kept for reference, not the
+confirmed cause here); [Chrome's `willReadFrequently` canvas heuristic](https://developer.chrome.com/blog/canvas2d)
+(tested directly per item 14 above, no effect).
 
 - Sends via `cyndilib` (`cyndilib.sender.Sender`, `FourCC.RGBA`), fixed 3840×2160 @ 30fps, on a dedicated capture/send thread, plus the loopback-captured `AudioSendFrame` thread described in §3.3 when `audio.yaml` has `enabled: true`.
 - On macOS, Chrome is launched with `--use-angle=metal`. Playwright's bundled headless Chromium otherwise defaults to the SwiftShader software renderer (confirmed live via CDP's `SystemInfo.getInfo`: `gpu_compositing`/`rasterization`/`2d_canvas` all `disabled_software`/`unavailable_software`) — every canvas draw and every wall capture was being rasterized entirely on the CPU, which was the majority cause of an inconsistent, well-below-target capture rate (observed: oscillating 12–28fps against the 30fps target) that read as choppy on the NDI feed. `--use-angle=metal` switches to the real GPU via Apple's Metal API (confirmed live afterwards: same query reports the real GPU's Metal renderer, all three features `enabled`), bringing capture to a steady ~28–30fps. ANGLE's Metal backend is macOS-only, so this flag is added conditionally; other platforms fall back to Chromium's own default backend selection.
