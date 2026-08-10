@@ -120,8 +120,11 @@ def test_load_broadcaster_config():
 Run: `uv run pytest tests/test_broadcaster_config.py -v`
 Expected: `test_timecode_fields_default_to_enabled_top` and
 `test_timecode_position_rejects_unknown_value` FAIL (fields don't exist
-yet); `test_load_broadcaster_config` FAILs on the unexpected keyword
-arguments.
+yet). `test_load_broadcaster_config` may or may not fail at this stage —
+`BroadcasterConfig` uses pydantic's default `extra="ignore"`, so passing
+the two new keyword arguments before the fields exist is silently accepted
+rather than rejected; the two new tests are what actually prove TDD rigor
+here.
 
 - [ ] **Step 3: Add the fields to `BroadcasterConfig`**
 
