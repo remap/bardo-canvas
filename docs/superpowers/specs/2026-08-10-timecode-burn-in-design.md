@@ -169,3 +169,87 @@ are needed, never a display window.
 - No frame-drop/timing-correction logic tied to the timecode itself (e.g.
   detecting and logging when `ff` skips) — this is a visual monitoring aid,
   not an instrumentation/metrics feature.
+
+## 11. Addendum (2026-08-10): Section 5 reverted — opencv collides with NDI's bundled ffmpeg
+
+The `cv2.putText()`-based rendering in Section 5 was implemented, reviewed,
+merged, then **reverted** after live verification against the flux-gallery
+sample app (commits `e8fc16a`, `839fe20`, `8fba372`, `0daabe5`, `4f7b761`;
+reverted in `ccf9da3`). Sections 1-10 above remain the accurate design for
+the feature's *behavior* (semantics, config, blast radius, snapshot/restore
+architecture) — only the rendering mechanism (Section 5) and the dependency
+(Section 8) are superseded.
+
+**The problem:** `opencv-python-headless` statically bundles its own
+FFmpeg (`libavdevice.61.3.100.dylib`), which defines the Objective-C
+classes `AVFFrameReceiver`/`AVFAudioReceiver` for its AVFoundation capture
+demuxer. The NDI SDK installed on this machine
+(`/Library/Application Support/NewTek/NDI/HX_Driver/libavdevice-ndi.61.dylib`)
+bundles a *different* FFmpeg build that defines the *same* class names.
+Loading both into one process — which happens the moment `import cv2` runs,
+regardless of whether `timecode_enabled` is true or `cv2.putText()` is ever
+called — causes the Objective-C runtime to log a duplicate-class warning
+("Class X is implemented in both... one of the two will be used. Which one
+is undefined.") and, confirmed live, produces real, intermittent
+`ScreenCaptureKit` (`SCStream`) frame-delivery failures: capture pushes that
+succeeded reliably before `cv2` was imported began failing (0 decodes) after
+the first push, in a flaky/non-deterministic pattern (not 100% reproducible
+run to run) consistent with "spurious" ObjC method dispatch resolving to
+the wrong class's implementation.
+
+**What was ruled out:**
+- `OPENCV_VIDEOIO_PRIORITY_FFMPEG=0` / `OPENCV_VIDEOIO_PRIORITY_AVFOUNDATION=0`
+  — these only steer which backend `cv2.VideoCapture`/`VideoWriter` picks at
+  runtime; they don't prevent the bundled dylib from loading at import time.
+  Tested directly against the real broadcaster: the warning still appeared,
+  and capture reliability was not restored.
+- This is a known, structural, ecosystem-wide problem with no official fix:
+  two macOS Python packages that each statically bundle their own FFmpeg
+  build will collide if both get loaded into the same process. See
+  `PyAV-Org/PyAV#2215` and `pipecat-ai/pipecat#3514`, both closed by their
+  maintainers as unfixable from the affected package's side.
+
+**Decision:** drop `opencv-python-headless` entirely. `Pillow` (already a
+base dependency, already loaded in this same process via
+`capture_cdp.decode_captured_frame`'s `PIL.Image.open()`, with no observed
+collision) is the replacement, used only for one-time glyph rasterization —
+see Section 12.
+
+## 12. Addendum (2026-08-10): Replacement rendering approach — precomputed glyph bitmaps
+
+The original objection to a Pillow-based design ("PIL is not the fastest
+way, and the precompute is a lot of work") was aimed at a design that calls
+into PIL *per frame*. That is not necessary for a fixed `hh:mm:ss:ff`
+timecode: there are only 11 possible glyphs (`0`-`9` and `:`), all
+monospaced, all rendered in a fixed font/size/color. Precomputing every
+glyph's RGBA pixel bitmap **once**, at `TimecodeOverlay.__init__` time, and
+blitting the ten needed glyphs into the frame per `apply()` call with plain
+numpy slicing/blending, removes PIL from the hot path entirely — its
+per-call performance is then irrelevant, since it is called exactly 11
+times total per broadcaster process lifetime, not once per frame.
+
+Runtime cost per `apply()` call becomes: for each of the 11 characters in
+`"hh:mm:ss:ff"`, a numpy slice-assign and an alpha-blend
+(`region = self._clean_patch_glyph_slot; blended = glyph_rgba * alpha +
+region * (1 - alpha)`) over a small fixed-size rectangle — cheaper than a
+single `cv2.putText()` call, no font rasterization, no library call of any
+kind, pure array arithmetic. This is the same technique real-time
+overlay/subtitle systems and hardware character generators have always
+used ("bitmap font" / glyph atlas blitting) — precompute once, blit many.
+
+Other options considered and rejected:
+- **`freetype-py`** (direct FreeType bindings): also collision-free (no
+  bundled FFmpeg), but strictly more dependency and API surface than
+  reusing Pillow, which is already installed and already proven safe in
+  this exact process.
+- **Fully hand-authored bitmap font** (glyph pixel data as literal
+  in-source constants, zero imaging library at all): maximally
+  collision-proof, but pure busywork here — Pillow already renders correct
+  glyphs at startup with no per-frame cost, so there is no performance
+  reason to hand-author pixel data.
+- **`Pillow-SIMD`** (drop-in faster Pillow fork): unnecessary — since PIL is
+  not in the hot path, its raw throughput doesn't matter for this feature.
+
+This replaces Section 5 and Section 8 (dependency) above; Sections 1-4 and
+6-10 (semantics, config, testing shape, non-goals) carry over unchanged to
+the reimplementation.
