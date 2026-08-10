@@ -246,17 +246,17 @@ async def _capture_loop_sck(
     from .virtual_display import ensure_helper_built, start_vdisplay_helper, wait_for_settled_bounds
 
     vdisplay_proc: subprocess.Popen | None = None
-    if config.sck_display_mode == "virtual":
-        helper_dir = REPO_ROOT / "ndi_broadcaster" / "vdisplay_helper"
-        binary_path = ensure_helper_built(helper_dir)
-        vdisplay_proc, info = start_vdisplay_helper(
-            binary_path, config.width, config.height, config.sck_virtual_display_name
-        )
-        display = wait_for_settled_bounds(info.display_id, config.width, config.height)
-    else:
-        display = find_physical_display(config.sck_physical_display_name)
-
     try:
+        if config.sck_display_mode == "virtual":
+            helper_dir = REPO_ROOT / "ndi_broadcaster" / "vdisplay_helper"
+            binary_path = ensure_helper_built(helper_dir)
+            vdisplay_proc, info = start_vdisplay_helper(
+                binary_path, config.width, config.height, config.sck_virtual_display_name
+            )
+            display = wait_for_settled_bounds(info.display_id, config.width, config.height)
+        else:
+            display = find_physical_display(config.sck_physical_display_name)
+
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
                 headless=False,
