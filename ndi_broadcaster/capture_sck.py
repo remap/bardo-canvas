@@ -88,6 +88,29 @@ def _find_target_window(content, title_hint: str):
     return matches[0]
 
 
+def _wait_for_target_window(title_hint: str, timeout_s: float = 10.0, poll_interval_s: float = 0.5):
+    """Retry the window lookup rather than a single one-shot attempt.
+
+    GOTCHA found live: setting document.title via page.evaluate() updates the
+    DOM synchronously, but propagating that to the native window's title (and
+    from there into SCShareableContent's snapshot) lags by several hundred
+    milliseconds -- confirmed live: a fresh SCShareableContent query taken
+    immediately after page.evaluate() returns still reports the page's
+    original <title>, and only reflects the renamed title on the next poll
+    ~0.5s later. The same class of lag as NSScreen.screens() caching a new
+    virtual display until the run loop processes a notification.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        content = _get_shareable_content()
+        try:
+            return _find_target_window(content, title_hint)
+        except ValueError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(poll_interval_s)
+
+
 class _StreamOutput(NSObject):
     def initWithOnFrame_(self, on_frame: Callable[[bytes], None]):
         self = objc.super(_StreamOutput, self).init()
@@ -157,8 +180,7 @@ class SckCapture:
         self._output = None
 
     def start(self) -> None:
-        content = _get_shareable_content()
-        window = _find_target_window(content, self._window_title_hint)
+        window = _wait_for_target_window(self._window_title_hint)
 
         content_filter = SCK.SCContentFilter.alloc().initWithDesktopIndependentWindow_(window)
 
