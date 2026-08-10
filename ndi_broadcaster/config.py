@@ -10,6 +10,9 @@ from pydantic import BaseModel
 class BroadcasterConfig(BaseModel):
     target_url: str = "https://localhost:8443/"
     capture_backend: Literal["cdp", "sck"] = "cdp"
+    sck_display_mode: Literal["virtual", "physical"] | None = None
+    sck_virtual_display_name: str = "Layout Driver Virtual Display"
+    sck_physical_display_name: str | None = None
     ndi_source_name: str = "Layout Driver"
     width: int = 3840
     height: int = 2160

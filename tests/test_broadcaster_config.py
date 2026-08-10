@@ -13,6 +13,9 @@ def test_load_broadcaster_config():
     assert config == BroadcasterConfig(
         target_url="https://localhost:8443/",
         capture_backend="cdp",
+        sck_display_mode=None,
+        sck_virtual_display_name="Layout Driver Virtual Display",
+        sck_physical_display_name=None,
         ndi_source_name="Layout Driver",
         width=3840,
         height=2160,
@@ -38,3 +41,15 @@ def test_capture_backend_accepts_sck():
 def test_capture_backend_rejects_unknown_value():
     with pytest.raises(ValidationError):
         BroadcasterConfig(capture_backend="bogus")
+
+
+def test_sck_fields_have_documented_defaults():
+    config = BroadcasterConfig()
+    assert config.sck_display_mode is None
+    assert config.sck_virtual_display_name == "Layout Driver Virtual Display"
+    assert config.sck_physical_display_name is None
+
+
+def test_sck_display_mode_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        BroadcasterConfig(sck_display_mode="bogus")
