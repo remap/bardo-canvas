@@ -112,10 +112,11 @@ Disk usage: the worker retains the most recent 200 images per screen plus 200 fu
 (gitignored).
 
 **Known limitation:** NDI capture fps degrades steadily while this worker is running
-(not while idle), down to single digits over several minutes, with no recovery on its
-own short of restarting the broadcaster. This is specific to flux-gallery — traced via
-native profiling to the closed-source NDI SDK itself, not to Flux/GPU contention or
-anything else in this repo. See framework spec §3.4a for the full investigation.
+(not while idle), down to single digits within a couple of minutes. Confirmed root
+cause: `disk_history.save_and_prune`'s own file-write volume/frequency (not Flux, not
+GPU, not the NDI SDK, not which image-generation backend is selected) — writing this
+much data this often competes with the broadcaster's own capture pipeline for system
+I/O. Not yet fixed; see framework spec §3.4a.
 
 ## Performance and correctness: how NDI capture actually works
 
