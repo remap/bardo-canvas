@@ -6,3 +6,4 @@ runtime/
 __pycache__/
 *.pyc
 apps/flux-gallery/output/
+ndi_broadcaster/vdisplay_helper/vdisplay_helper
