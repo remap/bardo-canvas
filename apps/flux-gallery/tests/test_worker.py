@@ -11,6 +11,7 @@ pytest.importorskip("fal_client")
 
 from flux_gallery.config import BaseGenerationConfig, PromptsConfig, ScreenPromptConfig
 from flux_gallery.worker import (
+    _pick_next_screen,
     _resolve_backend_name,
     _validate_backend_selection,
     _validate_screen_ids,
@@ -139,3 +140,24 @@ def test_validate_backend_selection_rejects_fal_without_fal_key():
 def test_validate_backend_selection_rejects_fal_with_empty_fal_key():
     with pytest.raises(ValueError, match="FAL_KEY"):
         _validate_backend_selection("fal", {"FAL_KEY": ""})
+
+
+def test_pick_next_screen_never_repeats_the_last_pick():
+    # Live-observed bug: plain random.choice() over a small pool visibly
+    # favored whichever screen it happened to repeat back-to-back.
+    screens = ["F", "B", "C", "D", "A", "E"]
+    last = "F"
+    for _ in range(50):
+        picked = _pick_next_screen(screens, last)
+        assert picked != last
+        last = picked
+
+
+def test_pick_next_screen_falls_back_to_the_full_pool_with_only_one_screen():
+    assert _pick_next_screen(["F"], "F") == "F"
+
+
+def test_pick_next_screen_first_call_has_no_exclusion():
+    # last_screen_id=None (no prior cycle yet) must not raise or accidentally
+    # match a screen literally named "None".
+    assert _pick_next_screen(["F", "B"], None) in ("F", "B")

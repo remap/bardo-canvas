@@ -70,6 +70,19 @@ def _resolve_backend_name(env: dict[str, str], base_config: BaseGenerationConfig
     return env.get("FLUX_BACKEND") or base_config.backend
 
 
+def _pick_next_screen(screen_ids: list[str], last_screen_id: str | None) -> str:
+    """Pick a random screen, excluding whichever was picked last cycle.
+
+    Without this, random.choice() over a small pool (six screens) visibly
+    favors whichever screen it happens to repeat -- confirmed live: two
+    back-to-back cycles landing on the same screen looked like only one
+    screen was ever updating. Falls back to the full pool when there's only
+    one screen (nothing else to exclude to).
+    """
+    candidates = [s for s in screen_ids if s != last_screen_id] or screen_ids
+    return random.choice(candidates)
+
+
 def _validate_backend_selection(backend_name: str, env: dict[str, str]) -> None:
     """Fail at boot on a fal backend selection with no FAL_KEY set.
 
@@ -115,8 +128,10 @@ def run_forever() -> None:
 
     output_dir = APP_ROOT / "output"
 
+    last_screen_id: str | None = None
     while True:
-        screen_id = random.choice(list(queues.keys()))
+        screen_id = _pick_next_screen(list(queues.keys()), last_screen_id)
+        last_screen_id = screen_id
         prompt = queues[screen_id].pop()
         width, height = compute_target_resolution(*screen_dims[screen_id])
 
