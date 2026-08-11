@@ -78,11 +78,13 @@ def _verdicts(displays, processes, name=OURS):
     return [c.verdict for c in classify(displays, processes, name)]
 
 
-def test_builtin_display_with_unit_number_zero_is_real_not_a_ghost():
-    # THE TRAP (spec 2.3): the Apple DTS forum thread recommends filtering on
+def test_builtin_real_values_are_not_mistaken_for_a_ghost():
+    # spec 2.3: the Apple DTS forum thread recommends filtering on
     # CGDisplayUnitNumber != 0, but this machine's built-in display genuinely
     # reports unit_number == 0. These are its real measured values. A bare
-    # `unit != 0` filter calls the laptop's own screen a ghost.
+    # `unit != 0` filter would call the laptop's own screen a ghost. The full
+    # ghost conjunction (unit == 0 AND vendor AND model AND serial ALL matching)
+    # protects against this.
     builtin = _display(
         display_id=1,
         vendor=1552,
@@ -94,6 +96,25 @@ def test_builtin_display_with_unit_number_zero_is_real_not_a_ghost():
     )
 
     assert _verdicts([builtin], {}) == [VERDICT_REAL]
+
+
+def test_is_builtin_is_checked_before_the_ghost_test():
+    # Synthetic on purpose: a real builtin display never reports the ghost
+    # signature. This record satisfies is_builtin AND the full ghost
+    # conjunction at once, so the verdict is decided by branch order alone --
+    # which is what makes it the only test that would fail if the two
+    # branches in classify() were swapped.
+    conflicting = _display(
+        display_id=1,
+        is_builtin=True,
+        unit_number=0,
+        vendor=GHOST_VENDOR,
+        model=GHOST_MODEL,
+        serial=0,
+        name="Built-in Retina Display",
+    )
+
+    assert _verdicts([conflicting], {}) == [VERDICT_REAL]
 
 
 def test_apple_synthetic_ghost_is_ignored():

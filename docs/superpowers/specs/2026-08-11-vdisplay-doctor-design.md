@@ -167,9 +167,10 @@ launcher and no chain-walking is needed.
 
 ### 4.2 Verdicts
 
-Evaluated **in this order**; the first matching row wins. The ordering is
-load-bearing: `is_builtin` must be tested before the ghost test, because the
-built-in display reports `unit_number == 0` (§2.3).
+Evaluated **in this order**; the first matching row wins. The built-in display
+is protected by the full ghost conjunction (all four conditions: `unit_number`,
+`vendor`, `model`, and `serial`), but checking `is_builtin` first is
+defense-in-depth (§2.3).
 
 A display counts as **ours** when its `name` matches `config_display_name` (or
 the probe name, §5.3), or when its `serial` attributes to a live
