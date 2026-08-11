@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +32,11 @@ def ensure_helper_built(helper_dir: Path) -> Path:
     binary_path = helper_dir / "vdisplay_helper"
     source_path = helper_dir / "main.swift"
     header_path = helper_dir / "CGVirtualDisplayPrivate.h"
-    if binary_path.exists() and binary_path.stat().st_mtime >= source_path.stat().st_mtime:
+    # Both files are compile inputs (the header via -import-objc-header
+    # below) -- checking only main.swift's mtime leaves a stale binary in
+    # place if only the header changes.
+    newest_input_mtime = max(source_path.stat().st_mtime, header_path.stat().st_mtime)
+    if binary_path.exists() and binary_path.stat().st_mtime >= newest_input_mtime:
         return binary_path
     subprocess.run(
         [
@@ -48,9 +54,18 @@ def ensure_helper_built(helper_dir: Path) -> Path:
 
 
 def start_vdisplay_helper(
-    binary_path: Path, width: int, height: int, name: str
+    binary_path: Path, width: int, height: int, name: str, timeout_s: float = 15.0
 ) -> tuple[subprocess.Popen, DisplayInfo]:
-    """Launch the compiled vdisplay_helper and parse its one-line JSON startup report."""
+    """Launch the compiled vdisplay_helper and parse its one-line JSON startup report.
+
+    The helper normally reports within a few seconds (settle + retry), but a
+    WindowServer/permission stall could otherwise block this readline()
+    indefinitely with no diagnostic -- every other bounded wait in this
+    startup path (healthz, settle, window lookup, startCapture) already has
+    an explicit timeout. Reading on a background thread (rather than e.g.
+    select() on the pipe) keeps this testable against a plain fake stdout
+    object, not just a real OS pipe.
+    """
     proc = subprocess.Popen(
         [str(binary_path), str(width), str(height), name],
         stdout=subprocess.PIPE,
@@ -58,7 +73,15 @@ def start_vdisplay_helper(
         text=True,
         bufsize=1,
     )
-    line = proc.stdout.readline()
+    line_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+    threading.Thread(target=lambda: line_queue.put(proc.stdout.readline()), daemon=True).start()
+    try:
+        line = line_queue.get(timeout=timeout_s)
+    except queue.Empty:
+        proc.kill()
+        raise TimeoutError(
+            f"vdisplay_helper did not report its startup status within {timeout_s}s"
+        ) from None
     if not line:
         err = proc.stderr.read()
         raise RuntimeError(f"vdisplay_helper produced no stdout; stderr:\n{err}")
@@ -94,10 +117,10 @@ def wait_for_settled_bounds(
     """
     AppKit.NSApplication.sharedApplication()
 
-    deadline = time.time() + timeout_s
+    deadline = time.monotonic() + timeout_s
     last_bounds = None
     stable_count = 0
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         Quartz.CFRunLoopRunInMode(Quartz.kCFRunLoopDefaultMode, 0.5, False)
 
         bounds = Quartz.CGDisplayBounds(display_id)

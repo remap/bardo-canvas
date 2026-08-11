@@ -10,12 +10,14 @@ import pytest
 
 from ndi_broadcaster.config import BroadcasterConfig
 from ndi_broadcaster.launcher import (
+    _CHROME_TOOLBAR_HEIGHT_PX,
     REPO_ROOT,
     HealthCheckTimeoutError,
     _chrome_launch_args,
     _decode_raw_rgba_frame,
     _LatestFrameSlot,
     _log_format,
+    _sck_chrome_window_size,
     _sender_thread_loop,
     _validate_sck_display_mode,
     resolve_launcher_paths,
@@ -23,6 +25,7 @@ from ndi_broadcaster.launcher import (
     run,
     wait_for_healthy,
 )
+from ndi_broadcaster.virtual_display import DisplayInfo
 
 
 def test_resolve_launcher_paths_defaults():
@@ -133,6 +136,21 @@ def test_validate_sck_display_mode_physical_requires_name():
         _validate_sck_display_mode(
             BroadcasterConfig(capture_backend="sck", sck_display_mode="physical")
         )
+
+
+def test_sck_chrome_window_height_matches_toolbar_crop():
+    # The load-bearing invariant: Chrome's window must be exactly
+    # _CHROME_TOOLBAR_HEIGHT_PX taller than config.height, since SckCapture
+    # is constructed with crop_top=_CHROME_TOOLBAR_HEIGHT_PX and crops
+    # exactly that many rows off the top of every captured frame. Drift
+    # between the two leaves a toolbar sliver or a black bar on the wall.
+    display = DisplayInfo(display_id=1, x=100, y=200, width=3840, height=2160)
+    config = BroadcasterConfig(width=3840, height=2160)
+
+    width, height = _sck_chrome_window_size(display, config)
+
+    assert width == display.width
+    assert height == config.height + _CHROME_TOOLBAR_HEIGHT_PX
 
 
 def test_run_requires_sck_display_mode_when_backend_is_sck(tmp_path, monkeypatch):

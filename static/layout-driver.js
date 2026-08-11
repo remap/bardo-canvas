@@ -261,6 +261,10 @@ export function enableScreenshotResponder(driver) {
   const screenshotWorker = new Worker(new URL("./screenshot-worker.js", import.meta.url));
   let nextScreenshotRequestId = 0;
   const pendingScreenshotRequests = new Map();
+  // Requests are cleaned up by whichever fires first -- an onmessage reply
+  // or the per-request timeout below -- so a worker-side error/crash (which
+  // never posts a reply) can't leak a pending promise for the life of the page.
+  const SCREENSHOT_WORKER_TIMEOUT_MS = 10000;
   screenshotWorker.onmessage = (event) => {
     const { requestId, blob } = event.data;
     const resolve = pendingScreenshotRequests.get(requestId);
@@ -268,6 +272,9 @@ export function enableScreenshotResponder(driver) {
       pendingScreenshotRequests.delete(requestId);
       resolve(blob);
     }
+  };
+  screenshotWorker.onerror = (event) => {
+    console.error("screenshot worker error:", event.message);
   };
 
   async function composite() {
@@ -284,7 +291,18 @@ export function enableScreenshotResponder(driver) {
     );
 
     const requestId = nextScreenshotRequestId++;
-    const result = new Promise((resolve) => pendingScreenshotRequests.set(requestId, resolve));
+    const result = new Promise((resolve) => {
+      const timeoutId = setTimeout(() => {
+        if (pendingScreenshotRequests.delete(requestId)) {
+          console.error(`screenshot worker request ${requestId} timed out; resolving with no data`);
+          resolve(null);
+        }
+      }, SCREENSHOT_WORKER_TIMEOUT_MS);
+      pendingScreenshotRequests.set(requestId, (blob) => {
+        clearTimeout(timeoutId);
+        resolve(blob);
+      });
+    });
     screenshotWorker.postMessage(
       {
         requestId,

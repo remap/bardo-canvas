@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ def test_ensure_helper_built_skips_compilation_when_binary_is_up_to_date(tmp_pat
     binary = tmp_path / "vdisplay_helper"
     binary.write_text("compiled")
     os.utime(source, (1000, 1000))
+    os.utime(header, (1000, 1000))
     os.utime(binary, (2000, 2000))
 
     def fail_if_called(*args, **kwargs):
@@ -75,6 +77,31 @@ def test_ensure_helper_built_recompiles_when_source_is_newer(tmp_path, monkeypat
     assert len(calls) == 1
 
 
+def test_ensure_helper_built_recompiles_when_only_header_is_newer(tmp_path, monkeypatch):
+    # The header is also a compile input (via -import-objc-header) -- editing
+    # only it, with main.swift untouched, must still trigger a rebuild rather
+    # than silently keeping a binary compiled against the old header.
+    source = tmp_path / "main.swift"
+    source.write_text("// source")
+    header = tmp_path / "CGVirtualDisplayPrivate.h"
+    header.write_text("// header")
+    binary = tmp_path / "vdisplay_helper"
+    binary.write_text("stale")
+    os.utime(source, (1000, 1000))
+    os.utime(binary, (2000, 2000))
+    os.utime(header, (3000, 3000))
+    calls = []
+
+    def fake_run(args, check):
+        calls.append(args)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ensure_helper_built(tmp_path)
+
+    assert len(calls) == 1
+
+
 def test_start_vdisplay_helper_parses_json_report(monkeypatch):
     payload = json.dumps({"displayID": 69732865, "x": 5000, "y": 0, "width": 3840, "height": 2160})
 
@@ -115,3 +142,28 @@ def test_start_vdisplay_helper_raises_when_no_output(monkeypatch):
 
     with pytest.raises(RuntimeError, match="swiftc binary crashed"):
         start_vdisplay_helper(Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display")
+
+
+def test_start_vdisplay_helper_raises_on_timeout_and_kills_the_process(monkeypatch):
+    # A helper that never writes to stdout (WindowServer/permission stall)
+    # must not block startup indefinitely -- confirm the bounded wait fires
+    # and the stuck process gets killed rather than left running.
+    class _FakeStdout:
+        def readline(self):
+            threading.Event().wait()  # blocks forever
+            return ""
+
+    killed = threading.Event()
+
+    class _FakeProc:
+        stdout = _FakeStdout()
+
+        def kill(self):
+            killed.set()
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
+
+    with pytest.raises(TimeoutError, match="did not report"):
+        start_vdisplay_helper(Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display", timeout_s=0.2)
+
+    assert killed.is_set()

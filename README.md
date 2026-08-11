@@ -111,17 +111,56 @@ Disk usage: the worker retains the most recent 200 images per screen plus 200 fu
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`
 (gitignored).
 
-**Known limitation:** NDI capture fps degrades steadily while this worker is running
-(not while idle), down to single digits within a couple of minutes, independent of
-disk I/O, Flux/GPU, or which image-generation backend is selected. Confirmed root
-cause: Playwright's own Node.js driver process, which the `cdp` capture backend
-depends on for every `page.evaluate()` call, accumulates unreleased state under
-sustained high-frequency use — a documented, years-old, externally unresolved
-Playwright limitation (not a bug in this repo), described in
-[microsoft/playwright#15400](https://github.com/microsoft/playwright/issues/15400).
-The fix in progress is a `sck` capture backend (macOS ScreenCaptureKit) that removes
-Playwright's driver from the sustained capture path entirely; see framework spec
-§3.4a for the full investigation and citations.
+**Known limitation (default `cdp` capture backend only):** NDI capture fps degrades
+steadily while this worker is running (not while idle), down to single digits within
+a couple of minutes, independent of disk I/O, Flux/GPU, or which image-generation
+backend is selected. Confirmed root cause: Playwright's own Node.js driver process,
+which the `cdp` capture backend depends on for every `page.evaluate()` call,
+accumulates unreleased state under sustained high-frequency use — a documented,
+years-old, externally unresolved Playwright limitation (not a bug in this repo),
+described in [microsoft/playwright#15400](https://github.com/microsoft/playwright/issues/15400).
+The `sck` capture backend below removes Playwright's driver from the sustained
+capture path entirely and does not have this problem; see framework spec §3.4a for
+the full investigation and citations.
+
+### sck capture backend (macOS ScreenCaptureKit)
+
+An alternative to the default `cdp` (CDP-screenshot) capture backend, set via
+`config/broadcaster.yaml`'s `capture_backend: "sck"`. Captures the composited page
+directly through ScreenCaptureKit instead of repeated `page.evaluate()` calls,
+avoiding the Playwright driver degradation described above. macOS only.
+
+Requirements:
+- Xcode Command Line Tools (`xcode-select --install`) for `swiftc` — the backend
+  compiles a small virtual-display helper (`ndi_broadcaster/vdisplay_helper/`) on
+  first use per machine and caches the binary next to its source.
+- Screen Recording permission for the terminal/process running the broadcaster
+  (System Settings → Privacy & Security → Screen Recording). Without it,
+  `SCShareableContent` requests silently return no windows.
+
+Additional `broadcaster.yaml` fields this backend uses:
+
+- `sck_display_mode` — `"virtual"` or `"physical"`, **required** when
+  `capture_backend: "sck"`. `"virtual"` creates an off-screen virtual display sized
+  exactly to `width`/`height`, positioned past your real displays' combined right
+  edge so it never overlaps them — nothing to configure, works headless. `"physical"`
+  captures a real connected display instead; use this if you want the wall visible on
+  actual hardware while it broadcasts.
+- `sck_virtual_display_name` — display name used in virtual mode (cosmetic).
+- `sck_physical_display_name` — **required** in physical mode: a case-insensitive
+  substring match against connected display names (e.g. `"UltraFine"`). The matched
+  display's reported resolution must equal `width`/`height` exactly — a HiDPI
+  display's default scaled point-resolution commonly differs from its pixel
+  resolution, and the broadcaster fails fast with the mismatch rather than silently
+  capturing at the wrong resolution.
+
+### Timecode overlay
+
+A configurable `hh:mm:ss:ff` elapsed-time overlay burned into every frame before NDI
+send, for at-a-glance confirmation the feed is live and ticking (not frozen). On by
+default. Configured via `broadcaster.yaml`'s `timecode_enabled` (bool) and
+`timecode_position` (`"top"` | `"bottom"`). Applies identically regardless of which
+capture backend is selected — see `ndi_broadcaster/timecode_overlay.py`.
 
 ## Performance and correctness: how NDI capture actually works
 

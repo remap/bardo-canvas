@@ -1,5 +1,17 @@
 # Timecode Burn-In Implementation Plan
 
+> **SUPERSEDED (2026-08-10):** This plan's `cv2`/`opencv-python-headless`
+> rendering approach (Tasks 1-3 below) was implemented, then reverted --
+> opencv's bundled ffmpeg collides with the NDI SDK's own bundled ffmpeg at
+> the Objective-C runtime level and degrades SCK capture reliability. Do not
+> follow Tasks 1-3 as written; they would reintroduce the exact dependency
+> that was reverted. The actual, current implementation uses Pillow
+> (precomputed glyph bitmaps, rasterized once at startup) + numpy blitting
+> instead. See `docs/superpowers/specs/2026-08-10-timecode-burn-in-design.md`
+> Sections 11-13 for the full account and the design that replaced Section 5
+> of that spec. The rest of this plan (config fields, integration point,
+> testing shape, non-goals) still describes the shipped behavior accurately.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Burn a configurable `hh:mm:ss:ff` timecode overlay into every frame

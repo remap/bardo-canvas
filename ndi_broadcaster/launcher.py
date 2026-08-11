@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import numpy as np
@@ -24,6 +25,12 @@ from .capture_cdp import decode_captured_frame
 from .config import BroadcasterConfig, load_broadcaster_config
 from .ndi_sender import VideoSender
 from .timecode_overlay import TimecodeOverlay
+
+if TYPE_CHECKING:
+    # virtual_display.py imports PyObjC frameworks at module scope, which must
+    # not become a hard import-time requirement for anyone running only the
+    # cdp backend -- see the matching lazy-import comment in _capture_loop_sck.
+    from .virtual_display import DisplayInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -134,8 +141,10 @@ def _sender_thread_loop(
     next_deadline = time.monotonic()
     decodes_since_log = 0
     decode_seconds_since_log = 0.0
+    decode_failures_since_log = 0
     sends_since_log = 0
     send_seconds_since_log = 0.0
+    send_failures_since_log = 0
     last_log = time.monotonic()
     while not stop_event.is_set():
         data = frame_slot.take()
@@ -147,10 +156,18 @@ def _sender_thread_loop(
                 # touched -- this is that moment. Only reached on a genuine
                 # new decode, never on a repeated/stale send below.
                 timecode_overlay.snapshot(last_frame)
+                decodes_since_log += 1
+                decode_seconds_since_log += time.monotonic() - decode_start
             except Exception:
-                logger.exception("Failed to decode a captured frame; skipping it")
-            decodes_since_log += 1
-            decode_seconds_since_log += time.monotonic() - decode_start
+                # Full traceback only for the first failure in a 5s window --
+                # a persistent failure (e.g. SCK delivering a buffer of the
+                # wrong shape) would otherwise write one full traceback per
+                # frame for the rest of the broadcast. The periodic summary
+                # below still reports the failure count every window, so a
+                # sustained failure stays visible without flooding the log.
+                if decode_failures_since_log == 0:
+                    logger.exception("Failed to decode a captured frame; skipping it")
+                decode_failures_since_log += 1
         if last_frame is not None:
             send_start = time.monotonic()
             try:
@@ -159,26 +176,32 @@ def _sender_thread_loop(
                 # ticking even when nothing new has been captured.
                 timecode_overlay.apply(last_frame)
                 sender.send(last_frame)
+                sends_since_log += 1
+                send_seconds_since_log += time.monotonic() - send_start
             except Exception:
-                logger.exception("Failed to send a frame; skipping it")
-            sends_since_log += 1
-            send_seconds_since_log += time.monotonic() - send_start
+                if send_failures_since_log == 0:
+                    logger.exception("Failed to send a frame; skipping it")
+                send_failures_since_log += 1
         now = time.monotonic()
         if now - last_log >= 5.0:
             decode_avg = (decode_seconds_since_log / decodes_since_log * 1000) if decodes_since_log else 0.0
             send_avg = (send_seconds_since_log / sends_since_log * 1000) if sends_since_log else 0.0
             logger.info(
-                "NDI sender: %d decodes (%.1fms avg), %d sends (%.1fms avg) in the last %.1fs",
+                "NDI sender: %d decodes (%.1fms avg, %d failed), %d sends (%.1fms avg, %d failed) in the last %.1fs",
                 decodes_since_log,
                 decode_avg,
+                decode_failures_since_log,
                 sends_since_log,
                 send_avg,
+                send_failures_since_log,
                 now - last_log,
             )
             decodes_since_log = 0
             decode_seconds_since_log = 0.0
+            decode_failures_since_log = 0
             sends_since_log = 0
             send_seconds_since_log = 0.0
+            send_failures_since_log = 0
             last_log = now
         next_deadline += frame_interval
         # Sleep only the time still owed on this frame's budget: sender.send() already
@@ -246,6 +269,21 @@ SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
 _CHROME_TOOLBAR_HEIGHT_PX = 87
 
 
+def _sck_chrome_window_size(display: DisplayInfo, config: BroadcasterConfig) -> tuple[int, int]:
+    """The (width, height) to launch Chrome's window at for the sck backend.
+
+    Deliberately factored out of _capture_loop_sck so this exact arithmetic
+    -- window height = config.height + _CHROME_TOOLBAR_HEIGHT_PX -- is
+    directly unit-testable against the same crop_top value passed to
+    SckCapture, without needing to mock Playwright or ScreenCaptureKit. The
+    two must always move together: SckCapture crops exactly crop_top rows
+    off the top of every captured frame, so a window shorter or taller than
+    config.height + crop_top leaves a toolbar sliver or a black bar at the
+    top of every frame on the live wall.
+    """
+    return display.width, config.height + _CHROME_TOOLBAR_HEIGHT_PX
+
+
 def _validate_sck_display_mode(config: BroadcasterConfig) -> None:
     """Fail at startup rather than mid-capture on a missing sck field.
 
@@ -298,8 +336,11 @@ async def _capture_loop_sck(
             )
             display = wait_for_settled_bounds(info.display_id, config.width, config.height)
         else:
-            display = find_physical_display(config.sck_physical_display_name)
+            display = find_physical_display(
+                config.sck_physical_display_name, config.width, config.height
+            )
 
+        window_width, window_height = _sck_chrome_window_size(display, config)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
                 headless=False,
@@ -311,7 +352,7 @@ async def _capture_loop_sck(
                     # _CHROME_TOOLBAR_HEIGHT_PX. SckCapture crops that many rows
                     # off the top of every captured frame, so the delivered
                     # frame is still exactly config.width x config.height.
-                    f"--window-size={display.width},{display.height + _CHROME_TOOLBAR_HEIGHT_PX}",
+                    f"--window-size={window_width},{window_height}",
                     "--ignore-certificate-errors",
                     "--disable-session-crashed-bubble",
                     "--disable-infobars",
@@ -332,7 +373,7 @@ async def _capture_loop_sck(
             # A framework-controlled, app-independent title: apps each set
             # their own <title>, so SCShareableContent window matching can't
             # rely on any single app's page title.
-            await page.evaluate(f"document.title = {SCK_WINDOW_TITLE!r}")
+            await page.evaluate("title => { document.title = title; }", SCK_WINDOW_TITLE)
 
             frame_slot = _LatestFrameSlot()
             sender_thread = threading.Thread(
@@ -343,20 +384,28 @@ async def _capture_loop_sck(
             )
             sender_thread.start()
 
-            capture = SckCapture(
-                SCK_WINDOW_TITLE,
-                config.width,
-                config.height,
-                config.fps,
-                on_frame=frame_slot.put,
-                crop_top=_CHROME_TOOLBAR_HEIGHT_PX,
-            )
-            capture.start()
+            # capture construction/start() is inside this try too: either can
+            # raise (window lookup timeout, addStreamOutput failure, startCapture
+            # timeout/error) after frames may have already begun flowing, and the
+            # sender thread + browser must still be torn down in that case rather
+            # than leaking a daemon thread stuck in sender.send() past this
+            # function's return.
+            capture: SckCapture | None = None
             try:
+                capture = SckCapture(
+                    SCK_WINDOW_TITLE,
+                    config.width,
+                    config.height,
+                    config.fps,
+                    on_frame=frame_slot.put,
+                    crop_top=_CHROME_TOOLBAR_HEIGHT_PX,
+                )
+                capture.start()
                 while not stop_event.is_set():
                     await asyncio.sleep(0.5)
             finally:
-                capture.stop()
+                if capture is not None:
+                    capture.stop()
                 stop_event.set()
                 sender_thread.join(timeout=5.0)
                 await browser.close()

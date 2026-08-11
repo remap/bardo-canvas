@@ -34,12 +34,11 @@ class ScreenCaptureKitUnavailableError(RuntimeError):
 
 
 try:
-    import objc
-    from Foundation import NSObject
-
     import CoreMedia as CM
+    import objc
     import Quartz
     import ScreenCaptureKit as SCK
+    from Foundation import NSObject
 except ImportError as exc:  # pragma: no cover - exercised only off-macOS
     raise ScreenCaptureKitUnavailableError(
         "capture_backend: sck requires macOS + pyobjc-framework-ScreenCaptureKit"
@@ -118,12 +117,13 @@ def _wait_for_target_window(title_hint: str, timeout_s: float = 10.0, poll_inter
 
 class _StreamOutput(NSObject):
     def initWithOnFrame_cropTop_(self, on_frame: Callable[[bytes], None], crop_top: int):
-        self = objc.super(_StreamOutput, self).init()
+        self = objc.super(_StreamOutput, self).init()  # noqa: PLW0642 -- required by the PyObjC initWith... idiom
         if self is None:
             return None
         self._on_frame = on_frame
         self._crop_top = crop_top
         self._frame_count = 0
+        self._failure_count = 0
         self._lock = threading.Lock()
         self._last_log = time.monotonic()
         return self
@@ -150,18 +150,29 @@ class _StreamOutput(NSObject):
                 bgra_buffer_to_rgba_bytes(raw, width, height, bytes_per_row, self._crop_top)
             )
         except Exception:
-            logger.exception("SCK frame callback raised; dropping this frame")
+            with self._lock:
+                # Full traceback only for the first failure since the last
+                # periodic log -- a persistent failure would otherwise write
+                # one full traceback per frame (up to config.fps times/sec)
+                # for the rest of the broadcast. The periodic fps log below
+                # still reports the failure count every window.
+                first_failure_this_window = self._failure_count == 0
+                self._failure_count += 1
+            if first_failure_this_window:
+                logger.exception("SCK frame callback raised; dropping this frame")
 
         with self._lock:
             self._frame_count += 1
             now = time.monotonic()
             if now - self._last_log >= 5.0:
                 logger.info(
-                    "SCK capture: %.1f fps in the last %.1fs",
+                    "SCK capture: %.1f fps, %d failed callbacks in the last %.1fs",
                     self._frame_count / (now - self._last_log),
+                    self._failure_count,
                     now - self._last_log,
                 )
                 self._frame_count = 0
+                self._failure_count = 0
                 self._last_log = now
 
 
@@ -236,6 +247,11 @@ class SckCapture:
             return
         stop_done = threading.Event()
         self._stream.stopCaptureWithCompletionHandler_(lambda error: stop_done.set())
-        stop_done.wait(10.0)
+        if not stop_done.wait(10.0):
+            # Completion handler never fired -- the stream may still be
+            # capturing. Leave _stream/_output in place rather than dropping
+            # our only references while SCK might still dispatch into them.
+            logger.warning("SCStream stopCapture did not complete within 10s")
+            return
         self._stream = None
         self._output = None
