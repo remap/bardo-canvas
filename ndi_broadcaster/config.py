@@ -18,6 +18,8 @@ class BroadcasterConfig(BaseModel):
     height: int = 2160
     fps: int = 30
     healthz_timeout_seconds: float = 30.0
+    timecode_enabled: bool = True
+    timecode_position: Literal["top", "bottom"] = "top"
 
 
 def load_broadcaster_config(path: Path) -> BroadcasterConfig:

@@ -23,6 +23,7 @@ from .audio_capture import AudioSender, resolve_input_device
 from .capture_cdp import decode_captured_frame
 from .config import BroadcasterConfig, load_broadcaster_config
 from .ndi_sender import VideoSender
+from .timecode_overlay import TimecodeOverlay
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -118,6 +119,16 @@ def _sender_thread_loop(
             data, target_width=config.width, target_height=config.height
         )
     )
+    # Constructed once per loop, not per frame: __init__ does the one-time
+    # glyph rasterization; snapshot()/apply() are the only calls in the hot
+    # path, and both are true no-ops when config.timecode_enabled is False.
+    timecode_overlay = TimecodeOverlay(
+        enabled=config.timecode_enabled,
+        position=config.timecode_position,
+        width=config.width,
+        height=config.height,
+        fps=config.fps,
+    )
     frame_interval = 1.0 / config.fps
     last_frame: np.ndarray | None = None
     next_deadline = time.monotonic()
@@ -132,6 +143,10 @@ def _sender_thread_loop(
             decode_start = time.monotonic()
             try:
                 last_frame = decode(data)
+                # snapshot() must run against a frame no overlay has ever
+                # touched -- this is that moment. Only reached on a genuine
+                # new decode, never on a repeated/stale send below.
+                timecode_overlay.snapshot(last_frame)
             except Exception:
                 logger.exception("Failed to decode a captured frame; skipping it")
             decodes_since_log += 1
@@ -139,6 +154,10 @@ def _sender_thread_loop(
         if last_frame is not None:
             send_start = time.monotonic()
             try:
+                # apply() runs on every send, fresh frame or the same
+                # repeated frame object alike, so the burned-in clock keeps
+                # ticking even when nothing new has been captured.
+                timecode_overlay.apply(last_frame)
                 sender.send(last_frame)
             except Exception:
                 logger.exception("Failed to send a frame; skipping it")

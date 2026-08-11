@@ -175,7 +175,11 @@ class _FakeSender:
         self.sent = []
 
     def send(self, frame):
-        self.sent.append(frame)
+        # A copy, not the same reference: _sender_thread_loop's overlay
+        # mutates `frame` in place and reuses the same object across
+        # repeated sends, so storing by reference would make every entry in
+        # `sent` alias the same, later-mutated array.
+        self.sent.append(frame.copy())
 
 
 def test_sender_thread_loop_defaults_to_decode_captured_frame(monkeypatch):
@@ -231,6 +235,67 @@ def test_sender_thread_loop_uses_custom_decode_fn():
     assert calls == [b"\x01\x02\x03\x04"]
     assert len(sender.sent) >= 1
     assert np.array_equal(sender.sent[0], decoded)
+
+
+class _FakeTimecodeOverlay:
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        self.snapshot_calls = 0
+        self.apply_calls = 0
+
+    def snapshot(self, frame):
+        self.snapshot_calls += 1
+
+    def apply(self, frame):
+        self.apply_calls += 1
+
+
+def test_sender_thread_loop_wires_timecode_overlay_snapshot_and_apply(monkeypatch):
+    # A fake overlay (rather than the real Pillow-backed one) keeps this test
+    # about the *wiring contract* -- construct once, snapshot() only on a
+    # genuine new decode, apply() on every send -- not about font rendering.
+    # The actual blend/no-drift math is covered by test_timecode_overlay.py.
+    fake_overlays = []
+
+    def fake_timecode_overlay(**kwargs):
+        overlay = _FakeTimecodeOverlay(**kwargs)
+        fake_overlays.append(overlay)
+        return overlay
+
+    monkeypatch.setattr("ndi_broadcaster.launcher.TimecodeOverlay", fake_timecode_overlay)
+
+    frame_slot = _LatestFrameSlot()
+    frame_slot.put(b"frame-1")  # only one frame ever arrives -- the rest are repeated sends
+    sender = _FakeSender()
+    config = BroadcasterConfig(
+        width=800, height=600, fps=30, timecode_enabled=True, timecode_position="bottom"
+    )
+    stop_event = threading.Event()
+    decoded = np.zeros((1, 1, 4), dtype=np.uint8)
+
+    thread = threading.Thread(
+        target=_sender_thread_loop,
+        args=(frame_slot, sender, config, stop_event),
+        kwargs={"decode_fn": lambda data: decoded},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.1)
+    stop_event.set()
+    thread.join(timeout=2.0)
+
+    assert len(fake_overlays) == 1
+    overlay = fake_overlays[0]
+    assert overlay.init_kwargs == {
+        "enabled": True,
+        "position": "bottom",
+        "width": 800,
+        "height": 600,
+        "fps": 30,
+    }
+    assert overlay.snapshot_calls == 1
+    assert len(sender.sent) > 1  # confirms the stale frame really was re-sent, not just decoded once
+    assert overlay.apply_calls == len(sender.sent)
 
 
 def test_decode_raw_rgba_frame_reshapes_and_returns_a_writable_array():
