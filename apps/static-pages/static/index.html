@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Static Pages</title>
+  </head>
+  <body>
+    <script type="module">
+      import { initLayoutDriver, enableStaticPageMode } from "/layout-driver.js";
+
+      // No enableScreenshotResponder() here on purpose: it (and the cdp capture
+      // backend's __ndiCaptureDataURL()) composite by drawing each screen's
+      // <canvas> element, and iframes -- what enableStaticPageMode uses -- can't
+      // be drawn that way. This app is meant to be used with the sck capture
+      // backend (the default), which captures real screen pixels directly and
+      // has no such limitation. See apps/static-pages/README.md.
+      const driver = await initLayoutDriver();
+      window.LayoutDriver = driver;
+      enableStaticPageMode(driver);
+    </script>
+  </body>
+</html>

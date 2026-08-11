@@ -147,6 +147,32 @@ export async function initLayoutDriver() {
   return driver;
 }
 
+// The simplest possible app mode: one static HTML file per screen, loaded
+// once into an iframe sized to fill that screen's area. No JavaScript, no
+// image-push API, no build step -- editing {screenId}.html and reloading
+// the page is the entire workflow, meant for people with no coding
+// background. See apps/static-pages for a working example of every screen.
+//
+// Only works correctly with the sck capture backend (captures real screen
+// pixels directly). compositeToCanvas() (the cdp backend's
+// __ndiCaptureDataURL(), and enableScreenshotResponder()'s /api/screenshot)
+// both composite by drawing each screen's <canvas> element with
+// ctx.drawImage() -- an iframe has no canvas to draw, so both would produce
+// a blank/black result for any screen using this mode. Don't call
+// enableScreenshotResponder() in an app that uses this.
+export function enableStaticPageMode(driver) {
+  for (const screen of driver.layoutConfig.screens) {
+    const container = driver.getScreenContainer(screen.id);
+    const iframe = document.createElement("iframe");
+    iframe.src = `${screen.id}.html`;
+    iframe.style.display = "block";
+    iframe.style.width = "100%";
+    iframe.style.height = "100%";
+    iframe.style.border = "none";
+    container.element.appendChild(iframe);
+  }
+}
+
 function drawCoverFit(ctx, image, canvasWidth, canvasHeight) {
   const fit = computeCoverFit(image.width, image.height, canvasWidth, canvasHeight);
   ctx.drawImage(image, fit.sx, fit.sy, fit.sWidth, fit.sHeight, fit.dx, fit.dy, fit.dWidth, fit.dHeight);

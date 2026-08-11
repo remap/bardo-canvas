@@ -77,6 +77,16 @@ element, not DRM. The `sck` backend sidesteps this differently: its window is re
 headed, but lives on an off-screen virtual display the operator never sees, so there's
 nothing to flash in the first place.
 
+### static-pages
+
+The simplest possible app: one plain static HTML file per screen (`F.html`, `B.html`,
+etc.), no JavaScript or build step required. Meant as a starting point for non-coders —
+see `apps/static-pages/README.md`.
+
+```bash
+./run.sh apps/static-pages/static
+```
+
 ### noraebang-generative
 
 Pure client-side p5.js generative sketches, one per screen, with a looping audio bed.
