@@ -9,12 +9,11 @@ pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 
 import torch
-
 from flux_gallery.backends.local import LocalBackend
 
 
 class _FakeImage:
-    def save(self, buffer, format):  # noqa: A002 - matches PIL.Image.save's signature
+    def save(self, buffer, format):
         buffer.write(b"fake-png-bytes")
 
 

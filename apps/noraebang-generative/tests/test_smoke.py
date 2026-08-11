@@ -1,61 +1,23 @@
 from __future__ import annotations
 
 import os
-import socket
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import httpx
 import pytest
+
+pytest.importorskip("playwright")
 from playwright.sync_api import sync_playwright
 
+from tests.server_test_utils import running_layout_driver_server
+
 APP_ROOT = Path(__file__).resolve().parent.parent
-REPO_ROOT = APP_ROOT.parent.parent
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 @pytest.fixture
 def running_server(tmp_path):
-    port = _find_free_port()
-    env = {
-        **os.environ,
-        "APP_DIR": str(APP_ROOT / "static"),
-        "LAYOUT_DRIVER_HOST": "127.0.0.1",
-        "LAYOUT_DRIVER_PORT": str(port),
-        "LAYOUT_DRIVER_RUNTIME_DIR": str(tmp_path / "runtime"),
-    }
-    process = subprocess.Popen(
-        [sys.executable, "-m", "layout_server.main"],
-        cwd=str(REPO_ROOT),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    try:
-        url = f"https://127.0.0.1:{port}/healthz"
-        deadline = time.monotonic() + 15
-        healthy = False
-        while time.monotonic() < deadline:
-            try:
-                if httpx.get(url, verify=False, timeout=1.0).status_code == 200:
-                    healthy = True
-                    break
-            except httpx.HTTPError:
-                pass
-            time.sleep(0.3)
-        if not healthy:
-            raise RuntimeError("server did not become healthy in time")
-        yield f"https://127.0.0.1:{port}/"
-    finally:
-        process.terminate()
-        process.wait(timeout=5)
+    with running_layout_driver_server(APP_ROOT / "static", tmp_path, dict(os.environ)) as url:
+        yield url
 
 
 def test_page_creates_six_canvases_with_no_console_errors_and_plays_audio(running_server):
@@ -85,9 +47,9 @@ def test_page_creates_six_canvases_with_no_console_errors_and_plays_audio(runnin
 
 
 def test_screenshot_endpoint_returns_the_composited_wall(running_server):
-    # The broadcaster's NDI capture pipeline polls /api/screenshot for every app it
-    # drives, so every app must call enableScreenshotResponder() -- this app didn't,
-    # which only surfaced once something actually depended on the endpoint working.
+    # flux-gallery's worker depends on /api/screenshot for its full-wall history
+    # snapshots, so every app must call enableScreenshotResponder() -- this app
+    # didn't, which only surfaced once something actually depended on it working.
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=True, args=["--autoplay-policy=no-user-gesture-required"]

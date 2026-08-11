@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
-import time
 
 import numpy as np
 from PIL import Image
@@ -11,8 +9,6 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 _logged_first_frame = False
 _warned_size_mismatch = False
-_DEBUG_DUMP_DIR = os.environ.get("NDI_DEBUG_DUMP_DIR")
-_last_debug_dump = 0.0
 
 
 def decode_captured_frame(
@@ -26,7 +22,7 @@ def decode_captured_frame(
     layoutConfig.canvas.width/height. The resize path below is a safety net, not an
     expected case: a wrong-shaped frame must never reach the NDI sender.
     """
-    global _logged_first_frame, _warned_size_mismatch, _last_debug_dump
+    global _logged_first_frame, _warned_size_mismatch
     image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
     if not _logged_first_frame:
         logger.info("First captured frame is %dx%d", *image.size)
@@ -47,7 +43,4 @@ def decode_captured_frame(
             )
             _warned_size_mismatch = True
         image = image.resize((target_width, target_height))
-    if _DEBUG_DUMP_DIR is not None and time.monotonic() - _last_debug_dump > 5.0:
-        _last_debug_dump = time.monotonic()
-        image.save(os.path.join(_DEBUG_DUMP_DIR, "latest-ndi-frame.png"))
     return np.array(image)

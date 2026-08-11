@@ -242,16 +242,6 @@ export function enableImageMode(driver) {
       resync();
     }
   });
-
-  return {
-    getActiveCanvas(screenId) {
-      const layer = layers.get(screenId);
-      if (!layer) {
-        return undefined;
-      }
-      return layer.canvases[layer.activeIndex];
-    },
-  };
 }
 
 export function enableScreenshotResponder(driver) {
@@ -293,8 +283,7 @@ export function enableScreenshotResponder(driver) {
   // The screenshot responder composites and PNG-encodes in screenshot-worker.js,
   // not via compositeToCanvas() above -- see that file for why (a real,
   // live-observed ScreenCaptureKit capture stall). compositeToCanvas() itself
-  // stays exactly as it was for __ndiCaptureDataURL()'s unrelated, unchanged
-  // cdp-path use below.
+  // is still used, unchanged, by __ndiCaptureDataURL()'s cdp-path capture below.
   const screenshotWorker = new Worker(new URL("./screenshot-worker.js", import.meta.url));
   let nextScreenshotRequestId = 0;
   const pendingScreenshotRequests = new Map();

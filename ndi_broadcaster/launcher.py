@@ -19,6 +19,7 @@ import numpy as np
 from playwright.async_api import async_playwright
 
 from layout_server.audio import discover_audio_devices, load_audio_config
+from layout_server.log_format import log_format
 
 from .audio_capture import AudioSender, resolve_input_device
 from .capture_cdp import decode_captured_frame
@@ -379,9 +380,7 @@ async def _capture_loop_sck(
                     f"--window-size={window_width},{window_height}",
                     "--ignore-certificate-errors",
                     "--disable-session-crashed-bubble",
-                    "--disable-infobars",
                     "--noerrdialogs",
-                    "--no-first-run",
                 ],
             )
             context = await browser.new_context(
@@ -465,11 +464,11 @@ async def _capture_loop(
         # flash; screenshot capture, content, and audio routing are all unaffected.
         browser = await playwright.chromium.launch(headless=True, args=_chrome_launch_args())
         context = await browser.new_context(
-            # Headless has no physical monitor to be smaller than this -- unlike the
-            # old headed kiosk window, Playwright's requested viewport is authoritative
-            # here, so #layout-driver-root's rescale() always resolves to scale=1 and
-            # root exactly fills the viewport. That's what makes capturing the whole
-            # viewport (via screencast, below) equivalent to capturing root directly.
+            # Headless has no physical monitor to be smaller than this, so Playwright's
+            # requested viewport is authoritative here, and #layout-driver-root's
+            # rescale() always resolves to scale=1 and root exactly fills the viewport.
+            # That's what makes capturing the whole viewport (via screencast, below)
+            # equivalent to capturing root directly.
             viewport={"width": config.width, "height": config.height},
             device_scale_factor=1,
             ignore_https_errors=True,
@@ -629,8 +628,9 @@ def run(
                 if not sender.is_open:
                     sender.open()
         elif audio_config.enabled:
-            print(
-                f"Audio input device not found: {audio_config.input_device!r} — continuing without audio"
+            logger.warning(
+                "Audio input device not found: %r — continuing without audio",
+                audio_config.input_device,
             )
 
         stop_event = threading.Event()
@@ -645,16 +645,6 @@ def run(
         sender.close()
 
 
-def _log_format(env: dict[str, str]) -> str:
-    """A port prefix distinguishes one instance's log lines from another's when
-    multiple instances run in the same terminal/log aggregator. Omitted when
-    LAYOUT_DRIVER_PORT isn't set, so output outside run.sh is unchanged.
-    """
-    port = env.get("LAYOUT_DRIVER_PORT")
-    prefix = f"[:{port}] " if port else ""
-    return f"%(asctime)s {prefix}%(levelname)s %(name)s: %(message)s"
-
-
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format=_log_format(dict(os.environ)))
+    logging.basicConfig(level=logging.INFO, format=log_format(dict(os.environ)))
     run()

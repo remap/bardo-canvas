@@ -19,7 +19,6 @@ from ndi_broadcaster.launcher import (
     _chrome_launch_args,
     _decode_raw_rgba_frame,
     _LatestFrameSlot,
-    _log_format,
     _raise_keyboard_interrupt,
     _sck_chrome_window_size,
     _sender_thread_loop,
@@ -51,16 +50,6 @@ def test_resolve_launcher_paths_env_overrides():
     )
     assert str(paths.broadcaster_yaml) == "/tmp/instance/broadcaster.yaml"
     assert str(paths.audio_yaml) == "/tmp/instance/audio.yaml"
-
-
-def test_log_format_without_port_matches_original_format():
-    assert _log_format({}) == "%(asctime)s %(levelname)s %(name)s: %(message)s"
-
-
-def test_log_format_with_port_adds_prefix():
-    assert _log_format({"LAYOUT_DRIVER_PORT": "8444"}) == (
-        "%(asctime)s [:8444] %(levelname)s %(name)s: %(message)s"
-    )
 
 
 class _HealthyHandler(http.server.BaseHTTPRequestHandler):

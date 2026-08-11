@@ -3,9 +3,11 @@
 Drives a 6-screen LED wall from a single composited browser page. `config/screens.yaml`
 is the source of truth for the wall's geometry: the server hands that layout to the page,
 the page draws every screen into one 3840×2160 canvas, and the NDI broadcaster captures
-that page in a headless Chrome instance and sends it out as a single NDI stream (plus audio).
-Apps are plain static directories that import `/layout-driver.js`; the framework itself
-never knows what they draw.
+that page and sends it out as a single NDI stream (plus audio). By default this capture
+happens via ScreenCaptureKit against a headed Chrome window on an off-screen virtual
+display (the `sck` backend, below) — an older `cdp` backend that captures a headless
+Chrome instance directly is also available. Apps are plain static directories that import
+`/layout-driver.js`; the framework itself never knows what they draw.
 
 ## Setup
 
@@ -39,10 +41,11 @@ producing the stream; what downstream AV hardware does with it is out of scope h
 
 ### Prototyping an app
 
-The NDI broadcaster runs a fully headless, uninstrumented browser — there is no window to
-look at, on purpose (see "Why the broadcaster is headless" below). To actually watch an
-app while you build it, in a normal resizable window, just open the composited page
-directly in any ordinary browser:
+The NDI broadcaster's own browser isn't meant to be watched directly — the default `sck`
+backend runs a headed Chrome window on an off-screen virtual display (see "Capture
+backends" below), and the `cdp` backend runs a fully headless browser. Either way, to
+actually watch an app while you build it, in a normal resizable window, just open the
+composited page directly in any ordinary browser:
 
 ```
 https://localhost:8443/
@@ -63,15 +66,16 @@ instance, so the two won't be pixel-identical — same layout and behavior, diff
 seed/timing. For a byte-for-byte check of the actual broadcast signal, use an NDI monitor
 instead (see above); reach for that only for final verification, not the everyday dev loop.
 
-#### Why the broadcaster is headless
+#### Why the `cdp` backend is headless
 
-Earlier versions launched a real, visible kiosk-mode Chrome window and captured it. That
-window doesn't exist anymore, and needing this section is exactly why: capturing a
-*visible* window at 30fps via repeated CDP screenshot calls was found to visibly flash the
+Earlier versions launched a real, visible kiosk-mode Chrome window and captured it: capturing
+a *visible* window at 30fps via repeated CDP screenshot calls was found to visibly flash the
 window itself (confirmed by isolating the same launch with the capture loop removed
 entirely — no flashing without it). Headless has no on-screen presentation to disrupt.
 Nothing here needs a real window in the first place — app audio is a plain `<audio>`
-element, not DRM.
+element, not DRM. The `sck` backend sidesteps this differently: its window is real and
+headed, but lives on an off-screen virtual display the operator never sees, so there's
+nothing to flash in the first place.
 
 ### noraebang-generative
 
@@ -179,10 +183,10 @@ capture backend is selected — see `ndi_broadcaster/timecode_overlay.py`.
 
 ## Performance and correctness: how NDI capture actually works
 
-The broadcaster does **not** use any Chrome DevTools Protocol screenshot API
-(`Page.captureScreenshot`, `Page.startScreencast`) to read the wall's content — every one
-of those was tried and independently found, via live testing, to unreliably return solid
-black for this app's canvases despite them holding correct, verified pixel data. This
+**`cdp` backend.** The broadcaster does **not** use any Chrome DevTools Protocol screenshot
+API (`Page.captureScreenshot`, `Page.startScreencast`) to read the wall's content — every
+one of those was tried and independently found, via live testing, to unreliably return
+solid black for this app's canvases despite them holding correct, verified pixel data. This
 matches a known class of Chromium bug (canvas content valid and readable from the page's
 own JS not reliably reaching Chromium's viewport-level capture pipeline). Instead,
 `static/layout-driver.js` exposes `window.__ndiCaptureDataURL()`, which composites the
@@ -191,6 +195,11 @@ approach `/api/screenshot` already used — and the broadcaster calls it directl
 Playwright's `page.evaluate()`, over the same CDP connection already driving the browser.
 No HTTP server, no network round trip, no second browser tab. See framework spec §3.4 for
 the full history of what was tried and why each attempt was abandoned.
+
+**`sck` backend** (the default) sidesteps this whole class of issue: it never goes through
+any Chrome DevTools screenshot API at all. ScreenCaptureKit captures the OS-level pixel
+buffer of Chrome's actual window directly, the same way any other screen-recording app
+would — see framework spec §3.4a and the sck design spec for that investigation.
 
 On macOS, `_chrome_launch_args()` (`ndi_broadcaster/launcher.py`) adds `--use-angle=metal`:
 Playwright's bundled headless Chromium otherwise defaults to the SwiftShader *software*

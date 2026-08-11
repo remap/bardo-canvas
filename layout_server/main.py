@@ -9,6 +9,7 @@ import uvicorn
 
 from .app import create_app
 from .certs import ensure_self_signed_cert
+from .log_format import log_format
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -41,19 +42,9 @@ def resolve_settings(env: dict[str, str]) -> ServerSettings:
     )
 
 
-def _log_format(env: dict[str, str]) -> str:
-    """A port prefix distinguishes one instance's log lines from another's when
-    multiple instances run in the same terminal/log aggregator. Omitted when
-    LAYOUT_DRIVER_PORT isn't set, so output outside run.sh is unchanged.
-    """
-    port = env.get("LAYOUT_DRIVER_PORT")
-    prefix = f"[:{port}] " if port else ""
-    return f"%(asctime)s {prefix}%(levelname)s %(name)s: %(message)s"
-
-
 def main() -> None:
     env = dict(os.environ)
-    logging.basicConfig(level=logging.INFO, format=_log_format(env))
+    logging.basicConfig(level=logging.INFO, format=log_format(env))
     settings = resolve_settings(env)
     ensure_self_signed_cert(settings.cert_path, settings.key_path)
 

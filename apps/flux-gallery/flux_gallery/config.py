@@ -26,9 +26,6 @@ class PromptsConfig(BaseModel):
     base: BaseGenerationConfig
     screens: list[ScreenPromptConfig]
 
-    def screen_by_id(self, screen_id: str) -> ScreenPromptConfig | None:
-        return next((screen for screen in self.screens if screen.id == screen_id), None)
-
 
 def load_prompts_config(path: Path) -> PromptsConfig:
     raw = yaml.safe_load(path.read_text())

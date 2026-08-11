@@ -4,8 +4,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from layout_server.app import create_app
-from layout_server.screen_store import ScreenImageStore  # noqa: F401 - used by Task 6 fixtures
-from layout_server.ws_manager import ConnectionManager  # noqa: F401 - used by Task 6 fixtures
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

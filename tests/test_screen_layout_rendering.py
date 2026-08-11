@@ -1,25 +1,13 @@
 from __future__ import annotations
 
 import os
-import socket
-import subprocess
-import sys
-import time
-from pathlib import Path
 
-import httpx
 import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import sync_playwright
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+from tests.server_test_utils import REPO_ROOT, running_layout_driver_server
 
 
 @pytest.fixture
@@ -28,39 +16,9 @@ def running_server(tmp_path):
     # canvases positioned via CSS, the code path the position:relative bug lived
     # in) -- noraebang-generative renders directly via p5.js and never exercises
     # this positioning logic at all.
-    port = _find_free_port()
-    env = {
-        **os.environ,
-        "APP_DIR": str(REPO_ROOT / "apps" / "flux-gallery" / "static"),
-        "LAYOUT_DRIVER_HOST": "127.0.0.1",
-        "LAYOUT_DRIVER_PORT": str(port),
-        "LAYOUT_DRIVER_RUNTIME_DIR": str(tmp_path / "runtime"),
-    }
-    process = subprocess.Popen(
-        [sys.executable, "-m", "layout_server.main"],
-        cwd=str(REPO_ROOT),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    try:
-        url = f"https://127.0.0.1:{port}/healthz"
-        deadline = time.monotonic() + 15
-        healthy = False
-        while time.monotonic() < deadline:
-            try:
-                if httpx.get(url, verify=False, timeout=1.0).status_code == 200:
-                    healthy = True
-                    break
-            except httpx.HTTPError:
-                pass
-            time.sleep(0.3)
-        if not healthy:
-            raise RuntimeError("server did not become healthy in time")
-        yield f"https://127.0.0.1:{port}/"
-    finally:
-        process.terminate()
-        process.wait(timeout=5)
+    app_dir = REPO_ROOT / "apps" / "flux-gallery" / "static"
+    with running_layout_driver_server(app_dir, tmp_path, dict(os.environ)) as url:
+        yield url
 
 
 def test_every_screen_renders_at_its_configured_rect(running_server):
