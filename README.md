@@ -111,24 +111,26 @@ Disk usage: the worker retains the most recent 200 images per screen plus 200 fu
 3840×2160 screenshots, roughly 2–3GB steady-state, under `apps/flux-gallery/output/`
 (gitignored).
 
-**Known limitation (default `cdp` capture backend only):** NDI capture fps degrades
-steadily while this worker is running (not while idle), down to single digits within
-a couple of minutes, independent of disk I/O, Flux/GPU, or which image-generation
-backend is selected. Confirmed root cause: Playwright's own Node.js driver process,
-which the `cdp` capture backend depends on for every `page.evaluate()` call,
-accumulates unreleased state under sustained high-frequency use — a documented,
-years-old, externally unresolved Playwright limitation (not a bug in this repo),
-described in [microsoft/playwright#15400](https://github.com/microsoft/playwright/issues/15400).
+**Known limitation (`cdp` capture backend only, not the default):** NDI capture fps
+degrades steadily while this worker is running (not while idle), down to single
+digits within a couple of minutes, independent of disk I/O, Flux/GPU, or which
+image-generation backend is selected. Confirmed root cause: Playwright's own
+Node.js driver process, which the `cdp` capture backend depends on for every
+`page.evaluate()` call, accumulates unreleased state under sustained
+high-frequency use — a documented, years-old, externally unresolved Playwright
+limitation (not a bug in this repo), described in
+[microsoft/playwright#15400](https://github.com/microsoft/playwright/issues/15400).
 The `sck` capture backend below removes Playwright's driver from the sustained
 capture path entirely and does not have this problem; see framework spec §3.4a for
 the full investigation and citations.
 
 ### sck capture backend (macOS ScreenCaptureKit)
 
-An alternative to the default `cdp` (CDP-screenshot) capture backend, set via
-`config/broadcaster.yaml`'s `capture_backend: "sck"`. Captures the composited page
-directly through ScreenCaptureKit instead of repeated `page.evaluate()` calls,
-avoiding the Playwright driver degradation described above. macOS only.
+The default capture backend (`config/broadcaster.yaml`'s `capture_backend: "sck"`,
+`sck_display_mode: "virtual"`), promoted from alternative to default once
+live-verified reliable where `cdp` degrades (above). Captures the composited page
+directly through ScreenCaptureKit instead of repeated `page.evaluate()` calls.
+macOS only. Set `capture_backend: "cdp"` to go back to the CDP-screenshot backend.
 
 Requirements:
 - Xcode Command Line Tools (`xcode-select --install`) for `swiftc` — the backend
@@ -137,6 +139,15 @@ Requirements:
 - Screen Recording permission for the terminal/process running the broadcaster
   (System Settings → Privacy & Security → Screen Recording). Without it,
   `SCShareableContent` requests silently return no windows.
+- Keep the display awake for the life of the broadcast (`caffeinate -d`, or your
+  own equivalent) — `sck_display_mode: virtual`'s `CGVirtualDisplay` creation was
+  observed becoming unreliable while this machine's display was asleep (idle
+  timeout; CLI activity doesn't count as user activity to macOS). If startup hangs
+  with `vdisplay_helper did not report its startup status within 15.0s`, this is
+  the first thing to check, followed by zombie virtual displays — see
+  `docs/superpowers/specs/2026-08-10-sck-capture-backend-design.md` §10 for the
+  full investigation, known fixes, and the one failure mode with no found
+  terminal-only remedy (waiting it out was the only thing that worked).
 
 Additional `broadcaster.yaml` fields this backend uses:
 

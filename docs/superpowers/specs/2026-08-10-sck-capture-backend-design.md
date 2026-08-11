@@ -314,3 +314,82 @@ Swift helper process exists in this mode.
   second proof-of-concept spike is not implemented here.
 - Removing, deprecating, or changing default behavior of `capture_backend:
   cdp` is explicitly out of scope — it remains the default, unchanged.
+  **Superseded by Section 10**: `sck`/`virtual` is now the default —
+  `cdp`'s fps-degradation problem is exactly what this backend fixes, and
+  by the time of that addendum it had been live-verified reliable.
+
+## 10. Addendum (2026-08-11): zombie virtual displays, display sleep, and sck as the default
+
+After the decisive live test passed (flux-gallery + noraebang-generative
+both held clean fps on `sck` where `cdp` degraded — see git history for
+that run), `sck`/`virtual` was promoted to the actual default in
+`config/broadcaster.yaml`, superseding the non-goal above.
+
+Two real bugs surfaced during that transition, both in
+`ndi_broadcaster/vdisplay_helper/main.swift`:
+
+**Leak on every graceful shutdown.** The SIGINT/SIGTERM handlers called
+`exit(0)` directly while `display` (the `CGVirtualDisplay` instance) was
+still a retained `let`. `exit()` is an abrupt process termination that does
+not run Swift's ARC deinit chain, so the `CGVirtualDisplay` — and the
+WindowServer-side virtual display it represents — was never actually torn
+down on a normal stop, only reclaimed later by whatever much slower,
+non-deterministic cleanup the OS eventually performs once it notices the
+owning process's connection died. Confirmed live: every graceful stop
+during this project's development left a zombie "Layout Driver Virtual
+Display" entry visible in `system_profiler SPDisplaysDataType` (or
+`NSScreen.screens()`, queried correctly — see below) for anywhere from a
+few minutes to, in one observed case, overnight. Enough accumulated zombies
+made `CGCompleteDisplayConfiguration` hang indefinitely for every
+subsequently created virtual display, blocking `sck`/`virtual` entirely
+until they cleared. Fixed: `display` is now `var display: CGVirtualDisplay?
+= ...`; both signal handlers call `shutdownAndExit()`, which sets `display
+= nil` (forcing a synchronous ARC deinit of the last strong reference)
+before `exit(0)`. Verified via repeated create/kill cycles: zero zombies
+left behind each time, versus one leaked every time before.
+
+**Missing color primaries.** `CGVirtualDisplayDescriptor` was never given
+`redPrimary`/`greenPrimary`/`bluePrimary`/`whitePoint` — the private header
+in this repo didn't even declare them. A working reference implementation
+of this same private API
+([knightynite/HiDPIVirtualDisplay](https://github.com/knightynite/HiDPIVirtualDisplay))
+documents that non-standard/undefined primaries make
+`colorsync.displayservices` deadlock against `colorsyncd`, blocking
+WindowServer's render threads — matching the `CGCompleteDisplayConfiguration`
+hang symptom exactly. Added the missing properties to
+`CGVirtualDisplayPrivate.h` and set exact sRGB IEC 61966-2.1 primaries in
+`main.swift`, letting ColorSync match its own cached profile instead of
+negotiating a custom one. Real and worth keeping, but tested directly and
+confirmed **not sufficient on its own** to clear a hang already in
+progress against a WindowServer instance with existing stuck displays.
+
+**Display sleep.** Separately, this machine's display sleeping (idle
+timeout — CLI tool activity doesn't count as user activity to macOS) was
+observed correlating with `CGVirtualDisplay` creation/configuration
+becoming unreliable, and with `NSScreen.screens()`/`CGGetActiveDisplayList`
+themselves returning inconsistent, sometimes flatly wrong results when
+queried without first spinning a `CFRunLoop` (`Quartz.CFRunLoopRunInMode`)
+— a sharper version of the caching gotcha `wait_for_settled_bounds` already
+documents. Running `caffeinate -d` for the duration of a broadcast is
+cheap insurance; a bare `NSApplication.sharedApplication()` call is not
+sufficient by itself to get a trustworthy one-shot display-list read, spin
+the run loop briefly too.
+
+**Unresolved.** Once multiple zombies had accumulated (worst case
+observed: 4), no code-level or terminal-only remedy was found to force
+their removal — there is no "remove by display ID" call anywhere in the
+private `CGVirtualDisplay*` API surface, restarting the
+`com.apple.colorsync.displayservices` XPC service and restarting the
+user-level `DisplaysExt` ExtensionKit process were both tried live and
+neither cleared the stuck state, and manually reloading `WindowServer`
+itself via `launchctl` is documented elsewhere as unreliable and
+potentially unrecoverable without a reboot. In the one case tracked
+through to resolution, the stuck state was gone the next time it was
+checked after an extended (overnight) wait, with no specific action
+identified as the cause. **If `sck`/`virtual` hangs at startup
+(`vdisplay_helper did not report its startup status within 15.0s`) and
+`ndi_broadcaster.launcher`'s log shows the same timeout, check for zombie
+virtual displays** (`NSScreen.screens()`, `NSApplication.sharedApplication()`
++ a brief `CFRunLoopRunInMode` spin first) **before assuming a code
+regression** — the two fixes above should make new leaks rare, but do not
+guarantee the underlying private API never gets stuck on its own.

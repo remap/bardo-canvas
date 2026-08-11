@@ -381,3 +381,53 @@ Chosen to keep the implementation small and readable, favoring current, actively
 - **`sounddevice`** for audio device enumeration/capture (same library karaoke-test already uses — proven for this exact job), **`cyndilib`** for NDI send, **Pillow** for image decode/validate, **Playwright** for browser automation.
 - **JavaScript**: no bundler/build step — native ES modules (`<script type="module">`), `fetch`, `WebSocket`, `structuredClone`; kept dependency-free except **p5.js** (current major version, ESM import, instance mode) for the generative sample app. Avoiding build tooling here is itself the "keep it simple" choice for a small kiosk page, not a gap.
 - **YAML** (via `PyYAML`) for all config files, matching the existing gentree/karaoke-test convention.
+
+## 10. Addendum (2026-08-11): a positioning bug that two independent draw paths hid from each other
+
+`enableImageMode()` (`static/layout-driver.js`) set every screen container's
+CSS `position` to `"relative"`, overriding `buildRoot()`'s `"absolute"`. A
+`position:relative` element's `top`/`left` are an offset from its normal
+document-flow position, not an absolute coordinate — so every screen after
+the first (screens stack in DOM order: F, B, C, D, A, E per
+`screens.yaml`) rendered shifted down by the combined height of every
+container before it. Confirmed live via `getBoundingClientRect()`: screen B
+rendered at `y=1480` instead of its configured `80`, C at `2680` instead of
+`680`, and so on — F looked correct only because nothing precedes it in
+flow. `container.style.top`/`left` themselves still read back as the
+correct configured values throughout, which is exactly why this went
+undetected for as long as it did: nothing had ever compared configured
+position against *actual rendered* position.
+
+The reason it stayed invisible specifically to this framework's own
+verification tooling: `/api/screenshot` and the `cdp` capture path's
+`__ndiCaptureDataURL()` both composited from `computeCompositePlacements()`
+(`static/geometry.js`), which derived placement from `screen.rect` — the
+config value — never the real DOM. Two independent paths were answering
+"where is screen X" with two different mechanisms that were supposed to
+agree, and only one of them (the real rendered page, which is what `sck`
+and any real screen capture actually see) was broken. The screenshot path
+stayed "correct" by construction, which made it worse than useless as a
+check.
+
+Fixed by removing the `position:relative` override (this section's Non-goal
+in §8 does not cover CSS regressions, but the general principle behind
+"screen rect is the single source of truth for where things go" — §2 — was
+being violated in practice by having a second, DOM-independent placement
+calculation) — and eliminated the second draw path structurally rather than
+just fixing this one instance of drift: `computeCompositePlacements()` is
+removed from `geometry.js`; `driver.measureScreenPlacements()`
+(`layout-driver.js`) reads actual `getBoundingClientRect()` values
+(normalized by the current preview-scale factor from `rescale()`) instead,
+and both `compositeToCanvas()` and the screenshot responder's `composite()`
+call it. There is now exactly one way to answer "where is screen X
+rendered," and if real layout is ever broken again, every consumer breaks
+the same way, visibly, instead of only the one nobody happened to be
+capturing from.
+
+Regression-tested with a real browser: `tests/test_screen_layout_rendering.py`
+loads the actual flux-gallery page via Playwright and asserts every
+screen's rendered position matches its configured rect — not the CSS style
+string, which stayed "correct" the entire time this bug was live.
+Adversarially verified during development: reintroducing the
+`position:relative` line made this test fail with the exact broken values
+observed live; removing it again restored a pass.
