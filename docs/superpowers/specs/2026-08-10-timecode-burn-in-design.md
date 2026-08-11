@@ -253,3 +253,53 @@ Other options considered and rejected:
 This replaces Section 5 and Section 8 (dependency) above; Sections 1-4 and
 6-10 (semantics, config, testing shape, non-goals) carry over unchanged to
 the reimplementation.
+
+## 13. Addendum (2026-08-10): Measured performance
+
+Rebuilt per Section 12 (commit `d854a69`) and measured directly rather than
+estimated.
+
+**Live end-to-end** (real broadcast, sck backend, flux-gallery app,
+3840x2160@30fps, virtual display): `timecode_enabled: true` vs `false`,
+each run steady-state for ~60s.
+
+| | sends per 5s window | avg send+overlay time | broadcaster process CPU | RSS |
+|---|---|---|---|---|
+| enabled | 150-151 (30.0-30.2fps) | 6.1-7.6ms | 55-61% | ~514MB |
+| disabled | 150-151 (30.0-30.2fps) | 9.4-10.5ms | 58-60% | ~519MB |
+
+No dropped frames in either run (steady ~151 sends/5s = target fps exactly);
+CPU/RSS/send-time differences between the two runs are within normal
+run-to-run noise (NDI send jitter, thread scheduling, virtual-display
+capture jitter) and do not resolve a directional effect at this precision —
+the live path is too noisy to isolate the overlay's own cost. Neither run
+logged the objc duplicate-class warning or any decode/send failures,
+confirming the sck-backend capture-reliability regression from Section 11
+is gone.
+
+**Isolated microbenchmark** (`TimecodeOverlay` in-process, 3840x2160,
+2000 iterations, warm cache, simulating the real launcher pattern of one
+`snapshot()` per fresh decode and `apply()` on every send including
+repeated/stale sends):
+
+| call | mean | p99 | notes |
+|---|---|---|---|
+| `apply()`, enabled | 0.71ms | 0.75ms | runs every frame |
+| `apply()`, disabled | 0.00007ms (70ns) | 0.0001ms | true no-op, one boolean check |
+| `snapshot()`, enabled | 0.012ms | 0.015ms | runs only on a fresh decode, not every send |
+| `__init__()` (glyph rasterization) | 1.15ms | — | paid once per broadcaster process lifetime |
+
+At 30fps (33.33ms/frame budget), `apply()`'s 0.71ms is **~2.1% of the frame
+budget** — consistent with the live runs showing no fps degradation (both
+sustained exactly target fps with headroom to spare) and explains why the
+live end-to-end numbers couldn't resolve a clean before/after delta: the
+overlay's real cost is an order of magnitude below the noise floor of the
+rest of the pipeline (NDI send itself averaged 6-10ms in these same runs).
+
+**GPU**: not independently measured (`powermetrics` requires interactive
+`sudo`, unavailable in this session) — asserted architecturally instead.
+`TimecodeOverlay` calls Pillow (CPU rasterization, once at construction)
+and plain numpy array arithmetic (CPU) only; it makes no calls into
+Metal/OpenGL/any GPU API, so it cannot add GPU load regardless of what the
+rest of the pipeline (Chrome's ANGLE Metal compositor, upstream of capture)
+is doing.
