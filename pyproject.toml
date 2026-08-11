@@ -40,7 +40,11 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["apps/flux-gallery"]
-addopts = "--import-mode=importlib"
+# Tests marked `live` need a real WindowServer and create real virtual
+# displays, so they are deselected by default and opted into with
+# `pytest -m live`. A command-line -m overrides this one (verified).
+addopts = "--import-mode=importlib -m 'not live'"
+markers = ["live: requires a real display server; not run by default"]
 
 [tool.ruff]
 line-length = 100
