@@ -1,4 +1,4 @@
-import { computeCoverFit, computeCompositePlacements } from "./geometry.js";
+import { computeCoverFit } from "./geometry.js";
 import { matchDeviceByName } from "./device-match.js";
 import { nextReconnectDelay, RECONNECT_BASE_DELAY_MS } from "./backoff.js";
 
@@ -57,7 +57,7 @@ function buildRoot(layoutConfig) {
   window.addEventListener("resize", rescale);
   rescale();
 
-  return containers;
+  return { containers, root };
 }
 
 function connectWebSocket(handlers, onConnectionChange) {
@@ -91,7 +91,7 @@ function connectWebSocket(handlers, onConnectionChange) {
 
 export async function initLayoutDriver() {
   const layoutConfig = await fetchScreens();
-  const containers = buildRoot(layoutConfig);
+  const { containers, root } = buildRoot(layoutConfig);
   const messageHandlers = [];
   let isConnected = false;
 
@@ -103,6 +103,31 @@ export async function initLayoutDriver() {
         throw new Error(`Unknown screen id: ${id}`);
       }
       return container;
+    },
+    // Measures each screen's ACTUAL rendered position/size, rather than
+    // recomputing it from layoutConfig.screens[].rect -- config and the real
+    // DOM are supposed to agree, but a CSS bug once silently broke that
+    // agreement for every screen but the first (position:relative overriding
+    // buildRoot()'s position:absolute), invisibly, because compositing used
+    // to trust the config value instead of checking. Anything that
+    // composites the wall (the cdp capture path, /api/screenshot) calls this
+    // so it can never again describe a different layout than what's actually
+    // on screen -- if the real layout is ever broken again, every consumer
+    // breaks the same way, visibly, instead of only the one nobody is
+    // capturing from at the time.
+    measureScreenPlacements() {
+      const rootRect = root.getBoundingClientRect();
+      const scale = rootRect.width / layoutConfig.canvas.width;
+      return layoutConfig.screens.map((screen) => {
+        const rect = this.getScreenContainer(screen.id).element.getBoundingClientRect();
+        return {
+          id: screen.id,
+          dx: (rect.left - rootRect.left) / scale,
+          dy: (rect.top - rootRect.top) / scale,
+          dWidth: rect.width / scale,
+          dHeight: rect.height / scale,
+        };
+      });
     },
     onMessage(handler) {
       messageHandlers.push(handler);
@@ -141,7 +166,19 @@ export function enableImageMode(driver) {
 
   for (const screen of driver.layoutConfig.screens) {
     const container = driver.getScreenContainer(screen.id);
-    container.element.style.position = "relative";
+    // Do NOT set position here: buildRoot() already made this container
+    // position:absolute (placed at screen.rect.x/y within #layout-driver-root).
+    // That's already a valid containing block for this function's
+    // position:absolute canvases -- overwriting it to "relative" (as this line
+    // used to) breaks the container's own absolute placement: a
+    // position:relative element's top/left become an OFFSET from its normal
+    // document-flow position instead of an absolute coordinate, so every
+    // screen after the first got shifted down by the combined height of every
+    // container before it in DOM order. Confirmed live: this only ever looked
+    // correct via /api/screenshot, which composites from screen.rect directly
+    // and never touches actual DOM layout -- the real rendered page (what SCK
+    // and any real screenshot of the browser window actually capture) was
+    // broken for every screen except the first the whole time.
 
     const canvasA = document.createElement("canvas");
     const canvasB = document.createElement("canvas");
@@ -243,7 +280,7 @@ export function enableScreenshotResponder(driver) {
     offscreenCtx.fillStyle = "black";
     offscreenCtx.fillRect(0, 0, offscreen.width, offscreen.height);
 
-    for (const placement of computeCompositePlacements(driver.layoutConfig.screens)) {
+    for (const placement of driver.measureScreenPlacements()) {
       const canvas = findCanvas(placement.id);
       if (!canvas) {
         continue;
@@ -278,7 +315,7 @@ export function enableScreenshotResponder(driver) {
   };
 
   async function composite() {
-    const placements = computeCompositePlacements(driver.layoutConfig.screens);
+    const placements = driver.measureScreenPlacements();
     // createImageBitmap() snapshots each canvas's current pixel buffer without
     // synchronously reading it on the main thread -- the actual compositing draw
     // calls and PNG encode happen in the worker, off pixel data transferred here

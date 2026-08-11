@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeCoverFit, computeCompositePlacements } from "./geometry.js";
+import { computeCoverFit } from "./geometry.js";
 
 test("computeCoverFit crops a wider source for a 9:7 destination (screen F)", () => {
   const result = computeCoverFit(1920, 1080, 1800, 1400);
@@ -36,14 +36,4 @@ test("computeCoverFit returns full-frame params for an exact aspect match", () =
   assert.equal(result.sy, 0);
   assert.equal(result.sWidth, 1800);
   assert.equal(result.sHeight, 1400);
-});
-
-test("computeCompositePlacements places each screen at its own rect", () => {
-  const screens = [
-    { id: "F", rect: { x: 220, y: 80, width: 1800, height: 1400 } },
-    { id: "B", rect: { x: 2020, y: 80, width: 1200, height: 600 } },
-  ];
-  const placements = computeCompositePlacements(screens);
-  assert.deepEqual(placements[0], { id: "F", dx: 220, dy: 80, dWidth: 1800, dHeight: 1400 });
-  assert.deepEqual(placements[1], { id: "B", dx: 2020, dy: 80, dWidth: 1200, dHeight: 600 });
 });
