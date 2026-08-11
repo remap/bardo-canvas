@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import platform
+import signal
 import subprocess
 import threading
 import time
@@ -532,10 +533,26 @@ async def _capture_loop(
                 await browser.close()
 
 
+def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
+    """SIGTERM handler: reuses the existing SIGINT/KeyboardInterrupt shutdown path.
+
+    Without this, run.sh's `kill "$BROADCASTER_PID"` (plain SIGTERM, no
+    handler installed by default in Python for that signal) kills this
+    process immediately -- the `except KeyboardInterrupt` below, and every
+    capture loop's `finally` cleanup nested inside it (which is what
+    terminates the sck backend's vdisplay_helper subprocess and tears down
+    its virtual display), never runs. Confirmed live: killing the launcher
+    process directly left vdisplay_helper running as an orphan, needing a
+    separate, manual kill to avoid leaking its virtual display.
+    """
+    raise KeyboardInterrupt
+
+
 def run(
     config_path: str | None = None,
     audio_config_path: str | None = None,
 ) -> None:
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     env = dict(os.environ)
     paths = resolve_launcher_paths(env)
     if config_path is None:

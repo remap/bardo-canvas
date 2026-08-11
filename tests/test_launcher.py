@@ -1,5 +1,6 @@
 import http.server
 import platform
+import signal
 import socketserver
 import textwrap
 import threading
@@ -18,6 +19,7 @@ from ndi_broadcaster.launcher import (
     _decode_raw_rgba_frame,
     _LatestFrameSlot,
     _log_format,
+    _raise_keyboard_interrupt,
     _sck_chrome_window_size,
     _sender_thread_loop,
     _validate_sck_display_mode,
@@ -103,6 +105,33 @@ def test_resolve_target_url_applies_override():
     # Every other field survives the override.
     assert resolved.fps == 25
     assert resolved == config.model_copy(update={"target_url": "https://localhost:9443/"})
+
+
+def test_raise_keyboard_interrupt_raises():
+    with pytest.raises(KeyboardInterrupt):
+        _raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+def test_run_installs_sigterm_handler(tmp_path, monkeypatch):
+    # Without this, run.sh's plain `kill "$BROADCASTER_PID"` (SIGTERM, no
+    # Python default handler) kills the process before the existing
+    # `except KeyboardInterrupt` cleanup path -- and everything nested
+    # inside it, including the sck backend's vdisplay_helper subprocess
+    # termination -- ever runs. Confirmed live: this orphaned
+    # vdisplay_helper and leaked its virtual display.
+    original_handler = signal.getsignal(signal.SIGTERM)
+    config_path = tmp_path / "broadcaster.yaml"
+    config_path.write_text('target_url: "https://localhost:8443/"\n')
+    monkeypatch.setattr(
+        "ndi_broadcaster.launcher.wait_for_healthy",
+        lambda *args, **kwargs: (_ for _ in ()).throw(HealthCheckTimeoutError("stop early")),
+    )
+    try:
+        with pytest.raises(HealthCheckTimeoutError):
+            run(config_path=str(config_path))
+        assert signal.getsignal(signal.SIGTERM) is _raise_keyboard_interrupt
+    finally:
+        signal.signal(signal.SIGTERM, original_handler)
 
 
 def test_run_uses_overridden_target_url(tmp_path, monkeypatch):
