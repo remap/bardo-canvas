@@ -12,7 +12,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import httpx
 import numpy as np
@@ -25,12 +24,6 @@ from .capture_cdp import decode_captured_frame
 from .config import BroadcasterConfig, load_broadcaster_config
 from .ndi_sender import VideoSender
 from .timecode_overlay import TimecodeOverlay
-
-if TYPE_CHECKING:
-    # virtual_display.py imports PyObjC frameworks at module scope, which must
-    # not become a hard import-time requirement for anyone running only the
-    # cdp backend -- see the matching lazy-import comment in _capture_loop_sck.
-    from .virtual_display import DisplayInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -269,7 +262,7 @@ SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
 _CHROME_TOOLBAR_HEIGHT_PX = 87
 
 
-def _sck_chrome_window_size(display: DisplayInfo, config: BroadcasterConfig) -> tuple[int, int]:
+def _sck_chrome_window_size(config: BroadcasterConfig) -> tuple[int, int]:
     """The (width, height) to launch Chrome's window at for the sck backend.
 
     Deliberately factored out of _capture_loop_sck so this exact arithmetic
@@ -280,8 +273,16 @@ def _sck_chrome_window_size(display: DisplayInfo, config: BroadcasterConfig) -> 
     off the top of every captured frame, so a window shorter or taller than
     config.height + crop_top leaves a toolbar sliver or a black bar at the
     top of every frame on the live wall.
+
+    Takes config, not the resolved display, even though the window is
+    positioned on that display: _validate_sck_display_mode and (in physical
+    mode) find_physical_display's resolution check both make display.width/
+    height == config.width/height a hard precondition before this is ever
+    called, and SckCapture itself is built from config.width/height too --
+    anchoring this function to the same source keeps that one invariant
+    self-evident instead of incidentally true.
     """
-    return display.width, config.height + _CHROME_TOOLBAR_HEIGHT_PX
+    return config.width, config.height + _CHROME_TOOLBAR_HEIGHT_PX
 
 
 def _validate_sck_display_mode(config: BroadcasterConfig) -> None:
@@ -340,7 +341,7 @@ async def _capture_loop_sck(
                 config.sck_physical_display_name, config.width, config.height
             )
 
-        window_width, window_height = _sck_chrome_window_size(display, config)
+        window_width, window_height = _sck_chrome_window_size(config)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
                 headless=False,
@@ -404,9 +405,15 @@ async def _capture_loop_sck(
                 while not stop_event.is_set():
                     await asyncio.sleep(0.5)
             finally:
-                if capture is not None:
-                    capture.stop()
+                # stop_event first, unconditionally: it cannot raise, and
+                # everything after it (sender thread join, browser close)
+                # must still run even if capture.stop() itself raises (e.g.
+                # stopCaptureWithCompletionHandler_ on a stream that never
+                # finished starting).
                 stop_event.set()
+                if capture is not None:
+                    with contextlib.suppress(Exception):
+                        capture.stop()
                 sender_thread.join(timeout=5.0)
                 await browser.close()
     finally:

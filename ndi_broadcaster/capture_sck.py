@@ -200,11 +200,13 @@ class SckCapture:
         self._stream = None
         self._output = None
 
-    def start(self) -> None:
-        window = _wait_for_target_window(self._window_title_hint)
-
-        content_filter = SCK.SCContentFilter.alloc().initWithDesktopIndependentWindow_(window)
-
+    def _build_stream_config(self):
+        """Split out of start() so the crop_top/height arithmetic below is
+        directly unit-testable against a real (permission-free)
+        SCStreamConfiguration, without needing a real target window --
+        that's the only other thing start() requires, via
+        _wait_for_target_window.
+        """
         config = SCK.SCStreamConfiguration.alloc().init()
         config.setWidth_(self._width)
         # The captured window is crop_top pixels taller than the target
@@ -215,6 +217,13 @@ class SckCapture:
         config.setQueueDepth_(8)
         config.setShowsCursor_(False)
         config.setPixelFormat_(_BGRA_PIXEL_FORMAT)
+        return config
+
+    def start(self) -> None:
+        window = _wait_for_target_window(self._window_title_hint)
+
+        content_filter = SCK.SCContentFilter.alloc().initWithDesktopIndependentWindow_(window)
+        config = self._build_stream_config()
 
         self._output = _StreamOutput.alloc().initWithOnFrame_cropTop_(
             self._on_frame, self._crop_top

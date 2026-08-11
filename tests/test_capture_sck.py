@@ -2,7 +2,11 @@ import pytest
 
 pytest.importorskip("ScreenCaptureKit")
 
-from ndi_broadcaster.capture_sck import _wait_for_target_window, bgra_buffer_to_rgba_bytes
+from ndi_broadcaster.capture_sck import (
+    SckCapture,
+    _wait_for_target_window,
+    bgra_buffer_to_rgba_bytes,
+)
 
 
 def test_bgra_buffer_to_rgba_bytes_reorders_channels_and_strips_row_padding():
@@ -80,3 +84,20 @@ def test_wait_for_target_window_raises_after_timeout(monkeypatch):
 
     with pytest.raises(ValueError, match="Some Other Window"):
         _wait_for_target_window("Layout Driver Broadcaster", timeout_s=0.05, poll_interval_s=0.01)
+
+
+def test_build_stream_config_requests_height_plus_crop_top():
+    # The other link in the Chrome-toolbar-crop chain (see
+    # launcher.py's _sck_chrome_window_size and _CHROME_TOOLBAR_HEIGHT_PX):
+    # the SCStream must be asked for exactly height + crop_top rows, since
+    # _StreamOutput crops crop_top rows back off every delivered frame. A
+    # real SCStreamConfiguration is safe to build here -- unlike start(),
+    # this needs no target window and no Screen Recording permission.
+    capture = SckCapture(
+        "Layout Driver Broadcaster", width=3840, height=2160, fps=30, on_frame=lambda b: None, crop_top=87
+    )
+
+    config = capture._build_stream_config()
+
+    assert config.width() == 3840
+    assert config.height() == 2160 + 87

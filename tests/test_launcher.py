@@ -4,6 +4,7 @@ import socketserver
 import textwrap
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -25,7 +26,13 @@ from ndi_broadcaster.launcher import (
     run,
     wait_for_healthy,
 )
-from ndi_broadcaster.virtual_display import DisplayInfo
+
+# Not ndi_broadcaster.virtual_display.DisplayInfo: that module imports PyObjC
+# frameworks at module scope (sys_platform == 'darwin' only), and this test
+# file must stay importable on every platform -- test_chrome_launch_args_omit_metal_off_macos
+# below exists specifically to run on non-macOS. _sck_chrome_window_size only
+# ever reads display.width, so a plain namespace is a sufficient stand-in.
+_FakeDisplay = SimpleNamespace
 
 
 def test_resolve_launcher_paths_defaults():
@@ -144,12 +151,11 @@ def test_sck_chrome_window_height_matches_toolbar_crop():
     # is constructed with crop_top=_CHROME_TOOLBAR_HEIGHT_PX and crops
     # exactly that many rows off the top of every captured frame. Drift
     # between the two leaves a toolbar sliver or a black bar on the wall.
-    display = DisplayInfo(display_id=1, x=100, y=200, width=3840, height=2160)
     config = BroadcasterConfig(width=3840, height=2160)
 
-    width, height = _sck_chrome_window_size(display, config)
+    width, height = _sck_chrome_window_size(config)
 
-    assert width == display.width
+    assert width == config.width
     assert height == config.height + _CHROME_TOOLBAR_HEIGHT_PX
 
 

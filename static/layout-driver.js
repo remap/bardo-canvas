@@ -333,6 +333,12 @@ export function enableScreenshotResponder(driver) {
       return;
     }
     const blob = await composite();
+    if (blob === null) {
+      // Worker crashed or timed out (see SCREENSHOT_WORKER_TIMEOUT_MS above)
+      // -- nothing to post. The server's own shorter timeout on this
+      // request has normally already given up by now regardless.
+      return;
+    }
     await fetch(`/api/screenshot-result/${message.request_id}`, { method: "POST", body: blob });
   });
 
