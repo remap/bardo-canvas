@@ -74,3 +74,37 @@ def test_every_screen_loads_its_own_html_file_at_the_right_position(running_serv
         browser.close()
 
     assert console_errors == []
+
+
+def test_editing_a_screen_file_reloads_the_page_automatically(running_server):
+    # enableAutoReload() (layout-driver.js) + the server's file watcher
+    # (layout_server/file_watcher.py) together are what makes "edit a file,
+    # see it moments later" true without a manual restart -- the whole point
+    # of this app for a non-coder. A real page reload resets all JS state,
+    # so a marker set before the edit disappearing (rather than some
+    # in-place DOM patch) is what actually proves a reload happened, not
+    # just that the iframe's own content changed.
+    f_html = APP_ROOT / "static" / "F.html"
+    original_content = f_html.read_text()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(ignore_https_errors=True, no_viewport=True)
+            page = context.new_page()
+            page.set_viewport_size({"width": 3840, "height": 2160})
+            page.goto(running_server, timeout=15000)
+            page.wait_for_timeout(1000)
+
+            page.evaluate("window.__reloadMarker = true")
+            assert page.evaluate("window.__reloadMarker") is True
+
+            f_html.write_text(original_content.replace(">F<", ">F-edited<"))
+            page.wait_for_timeout(1500)
+
+            assert page.evaluate("window.__reloadMarker") is None
+            frame = page.frame_locator('iframe[src="F.html"]')
+            assert frame.locator("h1").inner_text() == "F-edited"
+
+            browser.close()
+    finally:
+        f_html.write_text(original_content)

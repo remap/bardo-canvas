@@ -147,6 +147,20 @@ export async function initLayoutDriver() {
   return driver;
 }
 
+// Generic dev-convenience feature, usable by any app: the server watches its
+// static directory (and the shared framework one) for changes and broadcasts
+// a "reload" message over the same WebSocket every client already holds --
+// see layout_server/file_watcher.py. Opt-in (not automatic in
+// initLayoutDriver()) so a production broadcast never reloads unexpectedly
+// just because this function wasn't intentionally called.
+export function enableAutoReload(driver) {
+  driver.onMessage((message) => {
+    if (message.type === "reload") {
+      window.location.reload();
+    }
+  });
+}
+
 // The simplest possible app mode: one static HTML file per screen, loaded
 // once into an iframe sized to fill that screen's area. No JavaScript, no
 // image-push API, no build step -- editing {screenId}.html and reloading

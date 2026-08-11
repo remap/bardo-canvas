@@ -6,7 +6,7 @@
   </head>
   <body>
     <script type="module">
-      import { initLayoutDriver, enableStaticPageMode } from "/layout-driver.js";
+      import { initLayoutDriver, enableStaticPageMode, enableAutoReload } from "/layout-driver.js";
 
       // No enableScreenshotResponder() here on purpose: it (and the cdp capture
       // backend's __ndiCaptureDataURL()) composite by drawing each screen's
@@ -17,6 +17,10 @@
       const driver = await initLayoutDriver();
       window.LayoutDriver = driver;
       enableStaticPageMode(driver);
+
+      // Editing any file under this app's static/ directory (including this
+      // one) reloads the page automatically -- see layout_server/file_watcher.py.
+      enableAutoReload(driver);
     </script>
   </body>
 </html>
