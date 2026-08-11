@@ -1090,24 +1090,72 @@ git commit -m "vdisplay_doctor: reap reclaimable orphans, verifying the display 
 Append to `tests/test_vdisplay_doctor.py`:
 
 ```python
-from ndi_broadcaster.vdisplay_doctor import PROBE_DISPLAY_NAME, ProbeResult
+from ndi_broadcaster.vdisplay_doctor import probe
 
 
-def test_probe_uses_the_dedicated_probe_name_never_the_broadcast_name():
-    # A probe display must never be confusable with a real broadcast display,
-    # so that a leaked probe is immediately attributable to the probe.
-    assert PROBE_DISPLAY_NAME == "Layout Driver Probe Display"
-    assert PROBE_DISPLAY_NAME != OURS
+def test_probe_kills_the_helper_when_a_phase_fails_so_no_probe_display_leaks(monkeypatch):
+    # The failure path is the one that matters: a probe that dies in `settle`
+    # and leaves its helper running has leaked exactly the kind of display this
+    # whole tool exists to detect. Fakes stand in for the real startup path, so
+    # this runs with no display server.
+    import ndi_broadcaster.virtual_display as vd
+    from ndi_broadcaster.virtual_display import DisplayInfo
 
+    class _FakeProc:
+        def __init__(self):
+            self.killed = False
+            self.terminated = False
 
-def test_probe_result_reports_failure_phase_and_is_not_ok():
-    result = ProbeResult(
-        ok=False, timings={"create": 2.1}, failure_phase="settle", message="timed out"
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    fake_proc = _FakeProc()
+    monkeypatch.setattr(vd, "ensure_helper_built", lambda helper_dir: Path("/fake/helper"))
+    monkeypatch.setattr(
+        vd,
+        "start_vdisplay_helper",
+        lambda *a, **k: (fake_proc, DisplayInfo(display_id=999, x=0, y=0, width=1920, height=1080)),
     )
+
+    def boom(*_args, **_kwargs):
+        raise TimeoutError("display 999 did not settle")
+
+    monkeypatch.setattr(vd, "wait_for_settled_bounds", boom)
+
+    result = probe(1920, 1080, helper_dir=Path("/fake"))
 
     assert not result.ok
     assert result.failure_phase == "settle"
+    assert fake_proc.killed, "a failed probe must not leave its helper running"
+
+
+def test_probe_reports_the_phase_that_failed_when_the_helper_never_starts(monkeypatch):
+    import ndi_broadcaster.virtual_display as vd
+
+    monkeypatch.setattr(vd, "ensure_helper_built", lambda helper_dir: Path("/fake/helper"))
+
+    def never_starts(*_args, **_kwargs):
+        raise TimeoutError("vdisplay_helper did not report its startup status within 15.0s")
+
+    monkeypatch.setattr(vd, "start_vdisplay_helper", never_starts)
+
+    result = probe(1920, 1080, helper_dir=Path("/fake"))
+
+    assert not result.ok
+    assert result.failure_phase == "create"
+    assert "did not report" in result.message
 ```
+
+Note: `PROBE_DISPLAY_NAME` needs no test of its own — Task 2's
+`test_probe_display_name_is_also_recognised_as_ours` already covers the
+behaviour that matters, and asserting a constant equals its own literal tests
+nothing.
 
 - [ ] **Step 2: Write the failing live test**
 
@@ -1189,7 +1237,11 @@ def probe(
     are reported individually so a *slowing*
     CGCompleteDisplayConfiguration is visible before it becomes a hanging one.
     """
-    from .display_inventory import online_display_ids
+    # Imported inside the function, so monkeypatching these module attributes in
+    # tests takes effect (the import re-reads them on every call) and so a
+    # PyObjC-free environment can still import this module. online_display_ids
+    # is imported later still, just before the teardown poll, so a failure in
+    # build/create/settle never needs PyObjC at all.
     from .virtual_display import (
         ensure_helper_built,
         start_vdisplay_helper,
@@ -1227,6 +1279,8 @@ def probe(
         except TimeoutError as exc:
             return _fail("settle", str(exc))
         timings["settle"] = time.monotonic() - started
+
+        from .display_inventory import online_display_ids
 
         started = time.monotonic()
         proc.terminate()
