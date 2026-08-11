@@ -149,6 +149,10 @@ Requirements:
   full investigation, known fixes, and the one failure mode with no found
   terminal-only remedy (waiting it out was the only thing that worked).
 
+See `docs/bugs.md` for open issues, including a shutdown hang that can leave
+the broadcaster process (and its Chrome/`vdisplay_helper` children) alive
+indefinitely after a stop.
+
 Additional `broadcaster.yaml` fields this backend uses:
 
 - `sck_display_mode` — `"virtual"` or `"physical"`, **required** when

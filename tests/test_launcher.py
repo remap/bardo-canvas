@@ -1,3 +1,4 @@
+import asyncio
 import http.server
 import platform
 import signal
@@ -22,6 +23,7 @@ from ndi_broadcaster.launcher import (
     _raise_keyboard_interrupt,
     _sck_chrome_window_size,
     _sender_thread_loop,
+    _shutdown_with_timeout,
     _validate_sck_display_mode,
     resolve_launcher_paths,
     resolve_target_url,
@@ -110,6 +112,43 @@ def test_resolve_target_url_applies_override():
 def test_raise_keyboard_interrupt_raises():
     with pytest.raises(KeyboardInterrupt):
         _raise_keyboard_interrupt(signal.SIGTERM, None)
+
+
+def test_shutdown_with_timeout_awaits_a_quick_coroutine():
+    completed = []
+
+    async def quick():
+        completed.append(1)
+
+    asyncio.run(_shutdown_with_timeout(quick(), "test"))
+
+    assert completed == [1]
+
+
+def test_shutdown_with_timeout_does_not_hang_forever(monkeypatch):
+    # Live-observed bug: Playwright's own browser.close() / playwright.stop()
+    # have no timeout of their own and can hang indefinitely (a hung Node.js
+    # driver or Chrome process waiting on os.waitpid()), blocking this
+    # process's shutdown well past every other bounded timeout in the
+    # cleanup chain. This must resolve quickly regardless of how long the
+    # awaitable would otherwise hang.
+    monkeypatch.setattr("ndi_broadcaster.launcher._PLAYWRIGHT_SHUTDOWN_TIMEOUT_S", 0.05)
+
+    async def hangs_forever():
+        await asyncio.sleep(60)
+
+    start = time.monotonic()
+    asyncio.run(_shutdown_with_timeout(hangs_forever(), "test"))
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 5.0
+
+
+def test_shutdown_with_timeout_swallows_other_exceptions():
+    async def raises():
+        raise RuntimeError("simulated Playwright shutdown failure")
+
+    asyncio.run(_shutdown_with_timeout(raises(), "test"))  # must not raise
 
 
 def test_run_installs_sigterm_handler(tmp_path, monkeypatch):

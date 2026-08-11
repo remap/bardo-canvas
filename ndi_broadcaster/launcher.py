@@ -10,7 +10,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -262,6 +262,26 @@ SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
 # real headed launch and update this constant.
 _CHROME_TOOLBAR_HEIGHT_PX = 87
 
+# Both browser.close() and Playwright's own async_playwright() context-manager
+# exit (playwright.stop(), an alias for its __aexit__) wait on their
+# underlying Node.js driver process with no timeout of their own. Confirmed
+# live: a hung driver/Chrome exit blocked this process indefinitely, well
+# past every other bounded timeout in this shutdown path -- including the one
+# that terminates vdisplay_helper, which sat in that finally block never
+# getting a chance to run. _shutdown_with_timeout() bounds both call sites.
+_PLAYWRIGHT_SHUTDOWN_TIMEOUT_S = 10.0
+
+
+async def _shutdown_with_timeout(awaitable: Awaitable[None], description: str) -> None:
+    try:
+        await asyncio.wait_for(awaitable, timeout=_PLAYWRIGHT_SHUTDOWN_TIMEOUT_S)
+    except Exception:
+        logger.exception(
+            "%s did not complete within %.0fs; abandoning it",
+            description,
+            _PLAYWRIGHT_SHUTDOWN_TIMEOUT_S,
+        )
+
 
 def _sck_chrome_window_size(config: BroadcasterConfig) -> tuple[int, int]:
     """The (width, height) to launch Chrome's window at for the sck backend.
@@ -343,7 +363,9 @@ async def _capture_loop_sck(
             )
 
         window_width, window_height = _sck_chrome_window_size(config)
-        async with async_playwright() as playwright:
+        playwright_cm = async_playwright()
+        playwright = await playwright_cm.start()
+        try:
             browser = await playwright.chromium.launch(
                 headless=False,
                 args=[
@@ -416,7 +438,9 @@ async def _capture_loop_sck(
                     with contextlib.suppress(Exception):
                         capture.stop()
                 sender_thread.join(timeout=5.0)
-                await browser.close()
+                await _shutdown_with_timeout(browser.close(), "browser.close()")
+        finally:
+            await _shutdown_with_timeout(playwright.stop(), "Playwright driver shutdown")
     finally:
         if vdisplay_proc is not None:
             vdisplay_proc.terminate()
@@ -429,7 +453,9 @@ async def _capture_loop_sck(
 async def _capture_loop(
     config: BroadcasterConfig, sender: VideoSender, stop_event: threading.Event
 ) -> None:
-    async with async_playwright() as playwright:
+    playwright_cm = async_playwright()
+    playwright = await playwright_cm.start()
+    try:
         # Headless: nothing in this app (audio is a plain <audio> element, no DRM)
         # needs a real window, and capturing the wall via CDP screenshots of a
         # *visible* window at 30fps was hammering the compositor enough to cause
@@ -530,7 +556,9 @@ async def _capture_loop(
             try:
                 sender_thread.join(timeout=5.0)
             finally:
-                await browser.close()
+                await _shutdown_with_timeout(browser.close(), "browser.close()")
+    finally:
+        await _shutdown_with_timeout(playwright.stop(), "Playwright driver shutdown")
 
 
 def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
