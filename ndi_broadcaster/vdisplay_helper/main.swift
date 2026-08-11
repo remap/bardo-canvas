@@ -70,6 +70,19 @@ descriptor.name = displayName
 descriptor.maxPixelsWide = UInt32(width)
 descriptor.maxPixelsHigh = UInt32(height)
 descriptor.sizeInMillimeters = CGSize(width: 1600, height: 900)
+// Leaving these unset (the prior state of this file) means CGVirtualDisplay
+// gets undefined/default color primaries rather than a real profile to match
+// against. A working reference implementation of this same private API
+// (github.com/knightynite/HiDPIVirtualDisplay) documents that non-standard
+// primaries make colorsync.displayservices deadlock against colorsyncd,
+// which in turn blocks WindowServer's render threads -- exactly the
+// CGCompleteDisplayConfiguration hang observed live on this machine.
+// Exact sRGB IEC 61966-2.1 primaries let ColorSync match its own cached
+// profile instead of negotiating a custom one.
+descriptor.whitePoint = CGPoint(x: 0.3127, y: 0.3290)  // D65
+descriptor.redPrimary = CGPoint(x: 0.6400, y: 0.3300)
+descriptor.greenPrimary = CGPoint(x: 0.3000, y: 0.6000)
+descriptor.bluePrimary = CGPoint(x: 0.1500, y: 0.0600)
 // Randomized identity fields avoid colliding with any cached WindowServer
 // display-preference record keyed by vendor/product/serial from a prior run
 // of this or another virtual-display tool on this machine.

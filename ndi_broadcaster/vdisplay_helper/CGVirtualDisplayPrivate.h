@@ -64,6 +64,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic) unsigned int serialNum; // @synthesize serialNum=_serialNum;
 @property(nonatomic) unsigned int productID; // @synthesize productID=_productID;
 @property(nonatomic) unsigned int vendorID; // @synthesize vendorID=_vendorID;
+@property(nonatomic) CGPoint redPrimary;
+@property(nonatomic) CGPoint greenPrimary;
+@property(nonatomic) CGPoint bluePrimary;
+@property(nonatomic) CGPoint whitePoint;
 @property(copy, nonatomic) void (^terminationHandler)(id, CGVirtualDisplay*);
 
 - (instancetype)init;
