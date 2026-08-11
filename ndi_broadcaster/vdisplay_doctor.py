@@ -123,3 +123,113 @@ def read_process_table() -> dict[int, ProcessRecord]:
         check=True,
     )
     return parse_ps_output(completed.stdout)
+
+
+def _attributed_owner(serial: int, processes: dict[int, ProcessRecord]) -> ProcessRecord | None:
+    """Map a display's serial back to the vdisplay_helper that created it.
+
+    main.swift sets descriptor.serialNum to its own PID, so CGDisplaySerialNumber
+    returns the creating helper's PID. PIDs are recycled, though, so the mapping
+    is trusted only when that PID is live AND is actually a vdisplay_helper --
+    otherwise a display created by a long-dead helper would attribute to
+    whatever unrelated process inherited its PID, and reap would signal that
+    process. Failing to reclaim a display is recoverable; SIGTERMing a stranger
+    is not.
+    """
+    proc = processes.get(serial)
+    if proc is None:
+        return None
+    if HELPER_BINARY_NAME not in proc.command:
+        return None
+    return proc
+
+
+def classify(
+    displays: list[DisplayRecord],
+    processes: dict[int, ProcessRecord],
+    config_display_name: str,
+) -> list[Classification]:
+    """Assign one verdict per display. Pure: no I/O, no PyObjC, no subprocesses.
+
+    Rows are evaluated in the order documented in the spec's 4.2, first match
+    wins. The ordering is load-bearing: is_builtin must be tested before the
+    ghost test, because this machine's built-in display reports
+    unit_number == 0 and would otherwise be called a ghost.
+    """
+    our_names = {config_display_name, PROBE_DISPLAY_NAME}
+    results: list[Classification] = []
+
+    for display in displays:
+        if display.is_builtin:
+            results.append(Classification(display, VERDICT_REAL, None, "built-in display"))
+            continue
+
+        if (
+            display.unit_number == 0
+            and display.vendor == GHOST_VENDOR
+            and display.model == GHOST_MODEL
+            and display.serial == 0
+        ):
+            results.append(
+                Classification(display, VERDICT_APPLE_GHOST, None, "macOS synthetic ghost display")
+            )
+            continue
+
+        owner = _attributed_owner(display.serial, processes)
+
+        # A known name is authoritative: it is what system_profiler and NSScreen
+        # both report, and it cannot be spoofed by a serial/PID collision. Only
+        # fall back to serial attribution when the name is unavailable, which is
+        # itself the zombie signature (online but invisible to AppKit).
+        if display.name is not None:
+            is_ours = display.name in our_names
+        else:
+            is_ours = owner is not None
+
+        if not is_ours:
+            if not display.in_nsscreen:
+                results.append(
+                    Classification(
+                        display,
+                        VERDICT_FOREIGN_VIRTUAL,
+                        None,
+                        "not ours and invisible to NSScreen -- another tool's display",
+                    )
+                )
+            else:
+                results.append(Classification(display, VERDICT_REAL, None, "physical display"))
+            continue
+
+        if owner is None:
+            results.append(
+                Classification(
+                    display,
+                    VERDICT_ZOMBIE_B,
+                    None,
+                    f"owner pid {display.serial} is not a live {HELPER_BINARY_NAME}; "
+                    "no API exists to remove it",
+                )
+            )
+            continue
+
+        parent = processes.get(owner.ppid)
+        if parent is not None and LAUNCHER_MODULE in parent.command:
+            results.append(
+                Classification(
+                    display,
+                    VERDICT_ACTIVE,
+                    owner.pid,
+                    f"helper {owner.pid} is serving launcher {parent.pid}",
+                )
+            )
+        else:
+            results.append(
+                Classification(
+                    display,
+                    VERDICT_ORPHAN_A,
+                    owner.pid,
+                    f"helper {owner.pid} reparented to ppid {owner.ppid}; its launcher is gone",
+                )
+            )
+
+    return results
