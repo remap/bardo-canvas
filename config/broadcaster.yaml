@@ -1,6 +1,6 @@
 target_url: "https://localhost:8443/"
-capture_backend: "cdp"                          # "cdp" | "sck"
-sck_display_mode: null                          # "virtual" | "physical" -- required if capture_backend: sck
+capture_backend: "sck"                          # "cdp" | "sck"
+sck_display_mode: "virtual"                     # "virtual" | "physical" -- required if capture_backend: sck
 sck_virtual_display_name: "Layout Driver Virtual Display"  # sck + virtual only
 sck_physical_display_name: null                 # sck + physical only -- substring-matched against connected display names
 ndi_source_name: "Layout Driver"

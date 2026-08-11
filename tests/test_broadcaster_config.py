@@ -12,8 +12,8 @@ def test_load_broadcaster_config():
     config = load_broadcaster_config(BROADCASTER_YAML)
     assert config == BroadcasterConfig(
         target_url="https://localhost:8443/",
-        capture_backend="cdp",
-        sck_display_mode=None,
+        capture_backend="sck",
+        sck_display_mode="virtual",
         sck_virtual_display_name="Layout Driver Virtual Display",
         sck_physical_display_name=None,
         ndi_source_name="Layout Driver",
