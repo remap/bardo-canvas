@@ -12,8 +12,10 @@
 //   {"displayID": 69732865, "x": 5000, "y": 0, "width": 3840, "height": 2160}
 //
 // Then blocks (RunLoop.main.run()) holding the display open until it
-// receives SIGINT/SIGTERM, at which point it exits (deallocating the
-// CGVirtualDisplay object, which tears the display down).
+// receives SIGINT/SIGTERM, at which point it explicitly releases the
+// CGVirtualDisplay object (see shutdownAndExit()) before exiting, which
+// tears the display down -- exit() alone does not run Swift's ARC deinit
+// chain, so skipping that step leaks the display in WindowServer.
 
 import Cocoa
 import CoreGraphics
@@ -78,15 +80,19 @@ descriptor.terminationHandler = { _, _ in
     FileHandle.standardError.write("vdisplay_helper: termination handler fired\n".data(using: .utf8)!)
 }
 
-let display = CGVirtualDisplay(descriptor: descriptor)
+// var + Optional, not let: the signal handlers below need to explicitly nil
+// this out to force deterministic ARC deinit before the process exits --
+// see shutdownAndExit()'s comment for why. Force-unwrapped everywhere below
+// since it's guaranteed non-nil until shutdown.
+var display: CGVirtualDisplay? = CGVirtualDisplay(descriptor: descriptor)
 
 let mode = CGVirtualDisplayMode(width: UInt(width), height: UInt(height), refreshRate: 60.0)
 let settings = CGVirtualDisplaySettings()
 settings.hiDPI = 0
 settings.modes = [mode]
 
-let applied = display.apply(settings)
-FileHandle.standardError.write("vdisplay_helper: applySettings returned \(applied), displayID=\(display.displayID)\n".data(using: .utf8)!)
+let applied = display!.apply(settings)
+FileHandle.standardError.write("vdisplay_helper: applySettings returned \(applied), displayID=\(display!.displayID)\n".data(using: .utf8)!)
 
 if !applied {
     FileHandle.standardError.write("vdisplay_helper: FATAL applySettings failed\n".data(using: .utf8)!)
@@ -115,7 +121,7 @@ func findMode(_ displayID: CGDirectDisplayID, w: Int, h: Int) -> CGDisplayMode? 
 
 Thread.sleep(forTimeInterval: 1.5)
 
-if let allModes = CGDisplayCopyAllDisplayModes(display.displayID, nil) as? [CGDisplayMode] {
+if let allModes = CGDisplayCopyAllDisplayModes(display!.displayID, nil) as? [CGDisplayMode] {
     FileHandle.standardError.write("vdisplay_helper: available modes: \(allModes.map { ($0.width, $0.height) })\n".data(using: .utf8)!)
 }
 
@@ -123,7 +129,7 @@ var attempt = 0
 let maxAttempts = 6
 while attempt < maxAttempts {
     attempt += 1
-    guard let targetMode = findMode(display.displayID, w: width, h: height) else {
+    guard let targetMode = findMode(display!.displayID, w: width, h: height) else {
         FileHandle.standardError.write("vdisplay_helper: WARNING no matching CGDisplayMode found for \(width)x\(height) (attempt \(attempt))\n".data(using: .utf8)!)
         Thread.sleep(forTimeInterval: 0.5)
         continue
@@ -132,8 +138,8 @@ while attempt < maxAttempts {
     var config: CGDisplayConfigRef?
     let beginResult = CGBeginDisplayConfiguration(&config)
     if beginResult == .success, let config = config {
-        CGConfigureDisplayOrigin(config, display.displayID, desiredOriginX, desiredOriginY)
-        let modeResult = CGConfigureDisplayWithDisplayMode(config, display.displayID, targetMode, nil)
+        CGConfigureDisplayOrigin(config, display!.displayID, desiredOriginX, desiredOriginY)
+        let modeResult = CGConfigureDisplayWithDisplayMode(config, display!.displayID, targetMode, nil)
         let completeResult = CGCompleteDisplayConfiguration(config, .permanently)
         FileHandle.standardError.write("vdisplay_helper: attempt \(attempt): configureMode=\(modeResult.rawValue) complete=\(completeResult.rawValue)\n".data(using: .utf8)!)
     } else {
@@ -141,7 +147,7 @@ while attempt < maxAttempts {
     }
 
     Thread.sleep(forTimeInterval: 0.6)
-    let (w, h) = currentSize(display.displayID)
+    let (w, h) = currentSize(display!.displayID)
     FileHandle.standardError.write("vdisplay_helper: after attempt \(attempt), current size = \(w)x\(h)\n".data(using: .utf8)!)
     if w == width && h == height {
         break
@@ -150,11 +156,11 @@ while attempt < maxAttempts {
 
 // Never trust the requested origin as applied -- always read back the real
 // bounds WindowServer settled on.
-let bounds = CGDisplayBounds(display.displayID)
+let bounds = CGDisplayBounds(display!.displayID)
 FileHandle.standardError.write("vdisplay_helper: final bounds = \(bounds)\n".data(using: .utf8)!)
 
 let payload: [String: Any] = [
-    "displayID": display.displayID,
+    "displayID": display!.displayID,
     "x": Int(bounds.origin.x),
     "y": Int(bounds.origin.y),
     "width": Int(bounds.size.width),
@@ -167,10 +173,33 @@ if let jsonData = try? JSONSerialization.data(withJSONObject: payload),
 
 // Keep the display alive (and the process holding `display` retained) until
 // killed.
+func shutdownAndExit() -> Never {
+    // Explicitly release the last strong reference to `display` BEFORE
+    // exiting, rather than just calling exit(0) while it's still retained.
+    // exit() is an abrupt process termination that does not run Swift's ARC
+    // deinit chain -- calling it directly (the previous implementation)
+    // never actually tore the CGVirtualDisplay down. Confirmed live: doing
+    // that across many graceful shutdowns during this project's development
+    // left multiple zombie "Layout Driver Virtual Display" entries
+    // registered in WindowServer (visible in `system_profiler
+    // SPDisplaysDataType` long after every helper process had exited), and
+    // enough of them accumulating made CGCompleteDisplayConfiguration hang
+    // for every subsequently created virtual display. Setting `display` to
+    // nil here is what actually drops the refcount to zero and runs
+    // CGVirtualDisplay's deinit synchronously, before the process exits.
+    display = nil
+    // descriptor.terminationHandler (logged above) fires asynchronously in
+    // response to that deinit -- give it a brief moment to run and confirm
+    // in the log before this process's connection to the display server
+    // disappears entirely.
+    Thread.sleep(forTimeInterval: 0.3)
+    exit(0)
+}
+
 let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 sigintSource.setEventHandler {
     FileHandle.standardError.write("vdisplay_helper: SIGINT received, exiting\n".data(using: .utf8)!)
-    exit(0)
+    shutdownAndExit()
 }
 sigintSource.resume()
 signal(SIGINT, SIG_IGN)
@@ -178,11 +207,9 @@ signal(SIGINT, SIG_IGN)
 let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 sigtermSource.setEventHandler {
     FileHandle.standardError.write("vdisplay_helper: SIGTERM received, exiting\n".data(using: .utf8)!)
-    exit(0)
+    shutdownAndExit()
 }
 sigtermSource.resume()
 signal(SIGTERM, SIG_IGN)
 
-withExtendedLifetime(display) {
-    RunLoop.main.run()
-}
+RunLoop.main.run()
