@@ -237,18 +237,26 @@ def test_a_nameless_display_is_never_attributed_to_a_mere_mention_of_the_binary(
     assert result.owner_pid is None
 
 
-def test_a_system_profiler_name_alone_does_not_make_a_display_ours():
-    # spec 4.5: system_profiler emits no CGDirectDisplayID, so its names are
-    # paired positionally against the online-ID list -- and only in the zombie
-    # case, where the two orderings are least likely to agree. A real panel
-    # handed our display's name by a mispairing must not become a zombie_b
-    # FAIL on a healthy machine (which would also make `probe` refuse to run).
-    guessed = _display(name=OURS, in_nsscreen=False, name_source=NAME_SOURCE_SYSTEM_PROFILER)
+def test_a_sigkilled_helpers_display_named_only_by_system_profiler_is_still_a_zombie():
+    # THE headline case this whole tool exists to detect: helper SIGKILLed, so
+    # the display is alive in WindowServer, its owner PID is dead, and it is
+    # invisible to NSScreen. Its ONLY name comes from the system_profiler
+    # fallback -- by display_inventory's gate, that fallback runs *only* in
+    # this situation. Treating that name as worthless would send this display
+    # down serial attribution, find no live owner, and land it on
+    # foreign_virtual: not in ACTIONABLE_VERDICTS, so `scan` would print
+    # "OK ... 0 orphaned" and exit 0 on an actively leaking machine, one line
+    # below a row named exactly config.sck_virtual_display_name. spec 4.5's
+    # asymmetric trust exists to stop that: a guessed name is enough to REPORT.
+    zombie = _display(name=OURS, in_nsscreen=False, name_source=NAME_SOURCE_SYSTEM_PROFILER)
 
-    [result] = classify([guessed], {}, OURS)
+    [result] = classify([zombie], {}, OURS)
 
-    assert result.verdict == VERDICT_FOREIGN_VIRTUAL
+    assert result.verdict == VERDICT_ZOMBIE_B
     assert result.owner_pid is None
+    # The provenance must be legible: this is a weaker claim than a
+    # serial-attributed zombie, and an operator weighing a reboot should see it.
+    assert "system_profiler" in result.detail
 
 
 def test_a_system_profiler_name_alone_does_not_make_an_attributable_display_foreign():
@@ -440,6 +448,30 @@ def test_reap_never_signals_active_or_zombie_or_foreign_displays():
     assert world.signals == []
 
 
+def test_a_system_profiler_named_display_is_never_signalled_even_with_a_live_owner():
+    # The other half of spec 4.5's asymmetric trust, pinned end to end through
+    # the real reaper rather than inferred from the verdict alone. A guessed
+    # name is enough to REPORT a display as ours, never to SIGNAL one. Here the
+    # display carries a live, 4.3-guarded helper whose ppid is not a launcher
+    # -- the exact shape that otherwise yields orphan_a and a SIGTERM -- yet
+    # because the only thing making it ours is a positional system_profiler
+    # guess, it must stop at zombie_b and reap must send nothing at all.
+    processes = {4903: ProcessRecord(pid=4903, ppid=1, command=HELPER_CMD)}
+    guessed = _display(
+        serial=4903, name=OURS, in_nsscreen=False, name_source=NAME_SOURCE_SYSTEM_PROFILER
+    )
+
+    results = classify([guessed], processes, OURS)
+
+    assert [c.verdict for c in results] == [VERDICT_ZOMBIE_B]
+    assert results[0].owner_pid is None
+
+    world = _FakeWorld(present={69732865})
+
+    assert _run(world, results) == []
+    assert world.signals == [], "no signal may be sent on the strength of a guessed name"
+
+
 def test_reap_tolerates_an_owner_that_already_exited():
     world = _FakeWorld(present={69732865})
 
@@ -621,6 +653,29 @@ def test_scan_exits_dirty_when_a_zombie_is_present(monkeypatch):
     monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
 
     assert main(["scan", "--name", OURS]) == EXIT_DIRTY
+
+
+def test_scan_exits_dirty_for_a_zombie_named_only_by_system_profiler(monkeypatch, capsys):
+    # The exit-code half of the headline regression. A SIGKILLed helper's
+    # display is invisible to NSScreen and named only by the system_profiler
+    # fallback; if that name is treated as no evidence at all, the display
+    # lands on foreign_virtual, which is not in ACTIONABLE_VERDICTS, and `scan`
+    # prints "OK ... 0 orphaned" and exits CLEAN on a leaking machine. Worse,
+    # probe's "refuses a poisoned machine" guard keys on this exit code, so it
+    # would then create another display on an already-accumulating machine --
+    # the exact thing that guard exists to prevent.
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(name=OURS, in_nsscreen=False, name_source=NAME_SOURCE_SYSTEM_PROFILER)],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+    exit_code = main(["scan", "--name", OURS])
+    out = capsys.readouterr().out
+
+    assert exit_code == EXIT_DIRTY
+    assert "FAIL" in out
+    assert "1 zombie (unreclaimable)" in out
 
 
 def test_reap_exits_dirty_when_a_zombie_is_present(monkeypatch):

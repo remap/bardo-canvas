@@ -203,17 +203,20 @@ defense-in-depth (§2.3).
 
 A display counts as **ours** when its **NSScreen-sourced** `name` matches
 `config_display_name` (or the probe name, §5.3), or else when its `serial`
-attributes to a live `vdisplay_helper` under the §4.3 guard. A
-`system_profiler`-sourced name decides nothing here and falls through to the
-serial test — see §4.5 for why that pairing is a guess.
+attributes to a live `vdisplay_helper` under the §4.3 guard.
+
+A **`system_profiler`-sourced** name matching those names also makes a display
+ours, but *only for reporting*: such a display is pinned to `zombie_b` (row 5)
+and can never reach `active` or `orphan_a`, the two verdicts that lead to a
+signal. This asymmetry is deliberate and is spelled out in §4.5.
 
 | # | Verdict | Test | Action |
 |---|---|---|---|
 | 1 | `real` | `is_builtin` | Ignored |
 | 2 | `apple_ghost` | `unit_number == 0` **and** `vendor == 0x756E6B6E` **and** `model == 0x76697274` **and** `serial == 0` | Ignored entirely (§2.3) |
-| 3 | `active` | ours; owner PID live; owner's PPID is a live `ndi_broadcaster.launcher` | **Left alone** — serving a live broadcast |
-| 4 | `orphan_a` | ours; owner PID live; owner's PPID is gone (reparented to 1) | **Reclaimable** — SIGTERM (§5.2) |
-| 5 | `zombie_b` | ours; owner PID dead or fails the §4.3 guard | **Unreclaimable** — report the ladder |
+| 3 | `active` | ours **by NSScreen name or serial**; owner PID live; owner's PPID is a live `ndi_broadcaster.launcher` | **Left alone** — serving a live broadcast |
+| 4 | `orphan_a` | ours **by NSScreen name or serial**; owner PID live; owner's PPID is gone (reparented to 1) | **Reclaimable** — SIGTERM (§5.2) |
+| 5 | `zombie_b` | ours by a `system_profiler` name (whatever the owner); **or** ours otherwise with the owner PID dead or failing the §4.3 guard | **Unreclaimable** — report the ladder |
 | 6 | `foreign_virtual` | not ours, and absent from the `NSScreen` list | **Reported, never signalled** — may be BetterDisplay/DeskPad, not ours to touch |
 | 7 | `real` | everything else | Ignored |
 
@@ -239,8 +242,13 @@ and is the thing to kill.
 **basename of its `command`'s argv[0]** is exactly `vdisplay_helper`. PIDs are
 recycled; a display created by a long-dead helper whose PID now belongs to an
 unrelated process would otherwise cause this tool to signal that unrelated
-process. When the PID is live but is not a `vdisplay_helper`, the display
-downgrades to `zombie_b` — reported, never signalled. Losing the ability to
+process. When the PID is live but is not a `vdisplay_helper`, the attribution
+is discarded and the display can no longer reach `active` or `orphan_a` — the
+two signalling verdicts. Where it lands instead depends on what other evidence
+it has: a display already known to be ours by its NSScreen name downgrades to
+`zombie_b`, while a nameless one has nothing left to make it ours at all and
+falls through to `foreign_virtual` (row 6). Both are reported and never
+signalled, which is the property that matters here. Losing the ability to
 reclaim a display is an acceptable cost; SIGTERMing an arbitrary process is
 not.
 
@@ -251,10 +259,12 @@ reading of "its command names the helper" is a substring test over that whole
 string. A substring test is satisfied by
 `swiftc -O -o …/vdisplay_helper/vdisplay_helper …/main.swift` — a command
 **this tool's own `ensure_helper_built()` spawns** — and by any `vim` or `grep`
-open on this repo's paths. A nameless display attributes on `serial` alone
-(§4.5), so one such live PID colliding with a dead helper's recycled PID is
-enough to promote a `zombie_b` to `orphan_a` and get `swiftc` SIGTERMed and
-then SIGKILLed. Match `Path(argv[0]).name == "vdisplay_helper"`.
+open on this repo's paths. A nameless display attributes on `serial` alone, so
+one such live PID colliding with a dead helper's recycled PID is enough to
+promote it from `foreign_virtual` to `orphan_a` — and `reap` would then SIGTERM
+and SIGKILL `swiftc`. For a display already ours by its NSScreen name the same
+collision promotes `zombie_b` to `orphan_a`, with the same result. Match
+`Path(argv[0]).name == "vdisplay_helper"`.
 
 ### 4.4 Safety rule: the run-loop spin
 
@@ -300,11 +310,40 @@ panel's name becomes `foreign_virtual` and is silently never reaped.
 it. An NSScreen name is keyed by `NSScreenNumber`, i.e. by
 `CGDirectDisplayID`, so it is definitionally the right display's name and stays
 authoritative: it overrides serial attribution and cannot be spoofed by a
-serial/PID collision. A `system_profiler` name is a guess about *which*
-display it belongs to, so it is evidence for **labelling** the row in `scan`
-output and never for the ours/not-ours **decision**; such a record falls
-through to the §4.3-guarded serial attribution, the same path a display with no
-name at all takes.
+serial/PID collision.
+
+**Asymmetric trust, because the two harms are asymmetric.** The tempting
+correction — "a guessed name decides nothing, fall through to serial
+attribution" — is an over-correction, and it breaks the flagship case. A
+SIGKILLed helper's display has a dead owner PID *and* is invisible to NSScreen,
+so its `system_profiler` name is the **only** name it will ever have; discard
+that name and the display attributes to nothing, classifies `foreign_virtual`,
+and drops out of `ACTIONABLE_VERDICTS` entirely. `scan` then prints
+`OK … 0 orphaned` and exits 0 on an actively leaking machine, one line below a
+row named exactly `config_display_name` — and §5.3's "refuses a poisoned
+machine" guard, which keys on that exit code, stops refusing and creates
+another display on top of the accumulation it exists to prevent.
+
+The harm §4.5 is actually guarding against is **signalling** a stranger on the
+strength of a guessed name. **Reporting** on one carries no such risk. So the
+rule is asymmetric:
+
+> A `system_profiler` name matching `config_display_name` (or the probe name)
+> is sufficient to classify a display `zombie_b`, whatever its owner
+> attribution says. It is never sufficient to reach `active` or `orphan_a`.
+> **No signal is ever sent on the strength of a `system_profiler` name.**
+
+`zombie_b` is safe to reach on weak evidence precisely because §5.2's reaper
+skips it: nothing is ever signalled for a `zombie_b`, so a mispairing costs a
+false FAIL on a pre-flight gate. That fails in the safe direction — it stops a
+run rather than permitting a doomed one — whereas the missed detection above
+fails in the dangerous one. A display whose `system_profiler` name does *not*
+match ours still falls through to the §4.3-guarded serial attribution, the same
+path a display with no name at all takes.
+
+Because the two `zombie_b` provenances are not equally strong, the verdict's
+`detail` string names which one it rests on, so an operator deciding whether to
+wait or reboot can see whether the claim came from a serial or from a guess.
 
 ## 5. Commands
 
@@ -465,9 +504,16 @@ server, no subprocesses. Covers every row of §4.2 plus:
   traceback's 1.
 - §4.3's argv[0] rule, using the real `swiftc -O -o …/vdisplay_helper …`
   command line this repo spawns: it must not be adopted as an owner.
-- Both directions of §4.5's `name_source` rule: a `system_profiler` name
-  matching our config name must not on its own make a display ours, and must
-  not on its own make an otherwise-attributable display foreign.
+- Both directions of §4.5's asymmetric-trust rule. **The headline case:** a
+  dead-owner, NSScreen-invisible display named only by `system_profiler` must
+  classify `zombie_b` and make `scan` exit 1 — the regression that would
+  otherwise report `OK` on a leaking machine. **The safety property:** the same
+  guessed name, this time *with* a live §4.3-attributable helper whose PPID is
+  not a launcher, must still classify `zombie_b` and not `orphan_a`, asserted
+  by running the real `reap_orphans` over it and confirming it sends no signal
+  at all. Plus: a `system_profiler` name that does not match ours must not make
+  an otherwise-attributable display foreign, and an NSScreen name must stay
+  authoritative against a serial collision.
 - §2.1's SIGTERM-only invariant on every failure path in
   `start_vdisplay_helper` and in `probe`'s cleanup: the helper must be
   *terminated*, with `kill` seen only when a fake's `wait()` raises
@@ -506,3 +552,15 @@ When `bugs.md`'s shutdown hang is eventually fixed, `orphan_a` should stop
 occurring in practice; `scan` and `probe` remain useful as the pre-flight gate,
 and a recurrence of `orphan_a` becomes a signal that the shutdown fix
 regressed.
+
+**Not every `zombie_b` is equally certain.** One resting on a `system_profiler`
+name (§4.5) is a materially weaker claim than one resting on `serial`
+attribution: the name was paired positionally, so a mispairing can hand a real
+panel our display's name and produce a `zombie_b` — and therefore a FAIL, and a
+`probe` that refuses to run — on a machine that is actually healthy. That false
+positive is accepted deliberately, because the alternative is the failure it
+replaced: silently reporting `OK` on a machine that is leaking, which is the
+one outcome this tool must never produce. The verdict's `detail` string
+distinguishes the two provenances so the weaker claim is legible rather than
+implied, and `probe --force` remains the escape hatch when an operator judges
+the FAIL to be spurious.

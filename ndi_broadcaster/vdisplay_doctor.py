@@ -226,17 +226,35 @@ def classify(
 
         owner = _attributed_owner(display.serial, processes)
 
-        # An NSScreen name is authoritative: NSScreen keys it by NSScreenNumber
-        # (the CGDirectDisplayID), so it is certainly this display's own name,
-        # and it cannot be spoofed by a serial/PID collision. A system_profiler
-        # name is not: it is paired positionally (§4.5) and is a guess about
-        # *which* display it belongs to, so it decides nothing here and falls
-        # through to the §4.3-guarded serial attribution -- the same path taken
-        # when no name exists at all, which is itself the zombie signature.
+        # Trust in a name is ASYMMETRIC, because the two harms are asymmetric
+        # (§4.5). An NSScreen name is authoritative: NSScreen keys it by
+        # NSScreenNumber (the CGDirectDisplayID), so it is certainly this
+        # display's own name, and it cannot be spoofed by a serial/PID
+        # collision -- every verdict stays reachable from it.
+        #
+        # A system_profiler name is a positional guess about *which* display it
+        # belongs to. It is still enough to REPORT a display as ours, but never
+        # enough to SIGNAL one:
+        #
+        #   INVARIANT: no signal is ever sent on the strength of a
+        #   system_profiler name.
+        #
+        # So such a display is pinned to zombie_b below, short of orphan_a and
+        # active, which are the two verdicts that lead to a signal. zombie_b is
+        # safe to reach on weak evidence precisely because reap_orphans skips
+        # it: the cost of a false positive is a false FAIL on a pre-flight
+        # gate, which fails in the safe direction -- it stops a run rather than
+        # permitting a doomed one. Refusing to report on this name instead
+        # would silently miss the flagship case this tool exists for, since a
+        # SIGKILLed helper's display is invisible to NSScreen and the
+        # system_profiler fallback is the ONLY thing that ever names it.
+        name_is_ours = display.name is not None and display.name in our_names
+        report_only = name_is_ours and display.name_source == NAME_SOURCE_SYSTEM_PROFILER
+
         if display.name is not None and display.name_source == NAME_SOURCE_NSSCREEN:
-            is_ours = display.name in our_names
+            is_ours = name_is_ours
         else:
-            is_ours = owner is not None
+            is_ours = report_only or owner is not None
 
         if not is_ours:
             if not display.in_nsscreen:
@@ -250,6 +268,25 @@ def classify(
                 )
             else:
                 results.append(Classification(display, VERDICT_REAL, None, "physical display"))
+            continue
+
+        if report_only:
+            # Deliberately ahead of the owner check: even a live, §4.3-guarded
+            # helper does not promote this display, because the only reason it
+            # is ours at all is a positionally-guessed name. Reported, never
+            # signalled. The detail says so, since this is a materially weaker
+            # claim than the serial-attributed zombie below and an operator
+            # deciding whether to reboot deserves to know which one they have.
+            results.append(
+                Classification(
+                    display,
+                    VERDICT_ZOMBIE_B,
+                    None,
+                    f"named {display.name!r} by system_profiler's positional fallback, not by "
+                    "NSScreen -- ours by a guessed name only, so never signalled; "
+                    "no API exists to remove it",
+                )
+            )
             continue
 
         if owner is None:
