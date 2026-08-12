@@ -14,7 +14,12 @@ import subprocess
 import AppKit
 import Quartz
 
-from .vdisplay_doctor import DisplayRecord
+from .vdisplay_doctor import (
+    NAME_SOURCE_NONE,
+    NAME_SOURCE_NSSCREEN,
+    NAME_SOURCE_SYSTEM_PROFILER,
+    DisplayRecord,
+)
 
 _MAX_DISPLAYS = 32
 
@@ -54,7 +59,10 @@ def recover_names_via_system_profiler(display_ids: list[int]) -> dict[int, str]:
     collect_displays). system_profiler does not report CGDirectDisplayIDs, so
     names are matched positionally against `display_ids` -- best-effort by
     construction, and used only to label a display that would otherwise be
-    reported unnamed.
+    reported unnamed. Records built from these names carry
+    name_source=NAME_SOURCE_SYSTEM_PROFILER precisely so that classify() can
+    honour that limit rather than treating a guessed pairing as proof of
+    ownership (spec §4.5).
 
     Takes the caller's already-collected ID list rather than re-querying
     Quartz: this function reads no display state itself, so it has no
@@ -105,6 +113,16 @@ def collect_displays() -> list[DisplayRecord]:
     records: list[DisplayRecord] = []
     for display_id in ids:
         bounds = Quartz.CGDisplayBounds(display_id)
+        # Recorded rather than inferred downstream: `name` alone cannot say
+        # whether it was keyed by display ID (NSScreen) or guessed
+        # positionally (system_profiler), and classify() must not treat the
+        # second as evidence of ownership. See DisplayRecord's docstring.
+        if display_id in nsscreen_names:
+            name_source = NAME_SOURCE_NSSCREEN
+        elif display_id in fallback_names:
+            name_source = NAME_SOURCE_SYSTEM_PROFILER
+        else:
+            name_source = NAME_SOURCE_NONE
         records.append(
             DisplayRecord(
                 display_id=int(display_id),
@@ -123,6 +141,7 @@ def collect_displays() -> list[DisplayRecord]:
                 ),
                 name=nsscreen_names.get(display_id, fallback_names.get(display_id)),
                 in_nsscreen=display_id in nsscreen_names,
+                name_source=name_source,
             )
         )
     return records

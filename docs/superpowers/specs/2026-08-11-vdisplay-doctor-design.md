@@ -173,6 +173,7 @@ inactive and would be invisible to the active list:
 | `is_builtin`, `is_active`, `is_asleep` | `CGDisplayIsBuiltin` / `IsActive` / `IsAsleep` |
 | `bounds` | `CGDisplayBounds` |
 | `name` | `NSScreen.localizedName`, best-effort (§4.4) |
+| `name_source` | `"nsscreen"` / `"system_profiler"` / `"none"` — which of the two produced `name`, and therefore how much weight it carries (§4.5) |
 
 `ProcessRecord`, from a single `ps -Awwo pid=,ppid=,command=` invocation:
 `pid`, `ppid`, `command`. One call, not one per candidate, so a scan stays fast
@@ -200,9 +201,11 @@ is protected by the full ghost conjunction (all four conditions: `unit_number`,
 `vendor`, `model`, and `serial`), but checking `is_builtin` first is
 defense-in-depth (§2.3).
 
-A display counts as **ours** when its `name` matches `config_display_name` (or
-the probe name, §5.3), or when its `serial` attributes to a live
-`vdisplay_helper` under the §4.3 guard.
+A display counts as **ours** when its **NSScreen-sourced** `name` matches
+`config_display_name` (or the probe name, §5.3), or else when its `serial`
+attributes to a live `vdisplay_helper` under the §4.3 guard. A
+`system_profiler`-sourced name decides nothing here and falls through to the
+serial test — see §4.5 for why that pairing is a guess.
 
 | # | Verdict | Test | Action |
 |---|---|---|---|
@@ -232,13 +235,26 @@ and is the thing to kill.
 
 ### 4.3 Safety rule: PID-reuse guard
 
-`serial` → PID attribution is trusted **only** when that PID is live *and* its
-`command` names the `vdisplay_helper` binary. PIDs are recycled; a display created by a
-long-dead helper whose PID now belongs to an unrelated process would otherwise
-cause this tool to signal that unrelated process. When the PID is live but is
-not a `vdisplay_helper`, the display downgrades to `zombie_b` — reported, never
-signalled. Losing the ability to reclaim a display is an acceptable cost;
-SIGTERMing an arbitrary process is not.
+`serial` → PID attribution is trusted **only** when that PID is live *and* the
+**basename of its `command`'s argv[0]** is exactly `vdisplay_helper`. PIDs are
+recycled; a display created by a long-dead helper whose PID now belongs to an
+unrelated process would otherwise cause this tool to signal that unrelated
+process. When the PID is live but is not a `vdisplay_helper`, the display
+downgrades to `zombie_b` — reported, never signalled. Losing the ability to
+reclaim a display is an acceptable cost; SIGTERMing an arbitrary process is
+not.
+
+**argv[0], not a substring of the argument vector.** The distinction is
+safety-critical and easy to lose, because §4.1 collects the *full* vector (for
+the `active` verdict's `ndi_broadcaster.launcher` match) and the obvious
+reading of "its command names the helper" is a substring test over that whole
+string. A substring test is satisfied by
+`swiftc -O -o …/vdisplay_helper/vdisplay_helper …/main.swift` — a command
+**this tool's own `ensure_helper_built()` spawns** — and by any `vim` or `grep`
+open on this repo's paths. A nameless display attributes on `serial` alone
+(§4.5), so one such live PID colliding with a dead helper's recycled PID is
+enough to promote a `zombie_b` to `orphan_a` and get `swiftc` SIGTERMed and
+then SIGKILLed. Match `Path(argv[0]).name == "vdisplay_helper"`.
 
 ### 4.4 Safety rule: the run-loop spin
 
@@ -265,6 +281,30 @@ where the fast path lacks a name. Only then does the collector spend the
 confirms zombies remain visible there long after their helper processes exit.
 A healthy machine never pays this cost, keeping `scan` sub-second in the common
 case.
+
+**A recovered name labels; it does not decide.** This spec originally mandated
+the fallback without defining an ID mapping, and there is no reliable one to
+define: `system_profiler SPDisplaysDataType` emits no `CGDirectDisplayID` on
+any entry, so the only available pairing is **positional** — the
+`CGGetOnlineDisplayList` order against a per-GPU `spdisplays_ndrvs` order that
+nothing guarantees agrees with it. And the fallback runs *only* when
+`len(online) > len(NSScreen)`, i.e. exactly in the disordered zombie case it
+exists to serve. A mispairing is therefore not hypothetical, and it breaks
+attribution in both directions: a real panel handed our display's name becomes
+a false `zombie_b` FAIL on a healthy machine (and §5.3's "refuses a poisoned
+machine" guard then blocks the next run), while the actual zombie handed a real
+panel's name becomes `foreign_virtual` and is silently never reaped.
+
+`DisplayRecord` therefore carries a **`name_source`** field —
+`"nsscreen"` / `"system_profiler"` / `"none"` — and §4.2's "ours" test consults
+it. An NSScreen name is keyed by `NSScreenNumber`, i.e. by
+`CGDirectDisplayID`, so it is definitionally the right display's name and stays
+authoritative: it overrides serial attribution and cannot be spoofed by a
+serial/PID collision. A `system_profiler` name is a guess about *which*
+display it belongs to, so it is evidence for **labelling** the row in `scan`
+output and never for the ours/not-ours **decision**; such a record falls
+through to the §4.3-guarded serial attribution, the same path a display with no
+name at all takes.
 
 ## 5. Commands
 
@@ -385,6 +425,16 @@ a 5s bound on teardown verification.
 1 and 2 are distinct so a caller can tell "dirty machine" from "machine is
 broken", which are different decisions.
 
+Because those codes are the whole product of this tool, nothing may emit one by
+accident. Two defaults collide with them and are remapped: argparse exits **2**
+on a usage error, and an uncaught exception exits **1**. A mistyped flag must
+not raise the "not fit to run" alarm, and a `ps` failure or a missing PyObjC
+must not be read as "orphans present" by a caller scripting `scan || reap`.
+`main()` therefore catches argparse's usage `SystemExit` (leaving `--help`'s
+exit 0 alone) and wraps its own body in an `Exception` guard, reporting
+`ERROR` and returning **3** in both cases. `BaseException` is deliberately not
+caught: `KeyboardInterrupt` must still interrupt.
+
 ## 6. Testing
 
 ### 6.1 `tests/test_vdisplay_doctor.py` — hermetic
@@ -409,7 +459,19 @@ server, no subprocesses. Covers every row of §4.2 plus:
 - The SIGTERM → SIGKILL escalation, when the fake lister ignores SIGTERM.
 - A display that never disappears: must report unreclaimable and exit 1,
   not hang and not claim success.
-- Exit-code mapping for each §5.4 case.
+- Exit-code mapping for each §5.4 case, including the two remapped defaults: a
+  mistyped flag returning 3 rather than argparse's 2, `--help` still exiting 0,
+  and an unreadable process table returning 3 rather than an uncaught
+  traceback's 1.
+- §4.3's argv[0] rule, using the real `swiftc -O -o …/vdisplay_helper …`
+  command line this repo spawns: it must not be adopted as an owner.
+- Both directions of §4.5's `name_source` rule: a `system_profiler` name
+  matching our config name must not on its own make a display ours, and must
+  not on its own make an otherwise-attributable display foreign.
+- §2.1's SIGTERM-only invariant on every failure path in
+  `start_vdisplay_helper` and in `probe`'s cleanup: the helper must be
+  *terminated*, with `kill` seen only when a fake's `wait()` raises
+  `TimeoutExpired`.
 
 ### 6.2 `tests/test_vdisplay_doctor_live.py` — opt-in
 

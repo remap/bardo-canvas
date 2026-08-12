@@ -5,6 +5,9 @@ import pytest
 from ndi_broadcaster.vdisplay_doctor import (
     GHOST_MODEL,
     GHOST_VENDOR,
+    NAME_SOURCE_NONE,
+    NAME_SOURCE_NSSCREEN,
+    NAME_SOURCE_SYSTEM_PROFILER,
     PROBE_DISPLAY_NAME,
     VERDICT_ACTIVE,
     VERDICT_APPLE_GHOST,
@@ -71,6 +74,7 @@ def _display(**overrides) -> DisplayRecord:
         "bounds": (6116, 0, 3840, 2160),
         "name": OURS,
         "in_nsscreen": True,
+        "name_source": NAME_SOURCE_NSSCREEN,
     }
     base.update(overrides)
     return DisplayRecord(**base)
@@ -129,6 +133,7 @@ def test_apple_synthetic_ghost_is_ignored():
         bounds=(0, 0, 640, 480),
         name=None,
         in_nsscreen=False,
+        name_source=NAME_SOURCE_NONE,
     )
 
     assert _verdicts([ghost], {}) == [VERDICT_APPLE_GHOST]
@@ -148,6 +153,7 @@ def test_ghost_test_requires_the_full_conjunction(field, value):
         "serial": 0,
         "name": None,
         "in_nsscreen": False,
+        "name_source": NAME_SOURCE_NONE,
     }
     overrides[field] = value
     nearly = _display(**overrides)
@@ -196,6 +202,87 @@ def test_pid_reuse_guard_refuses_to_attribute_a_recycled_pid():
     assert result.owner_pid is None
 
 
+def test_pid_reuse_guard_matches_argv0_not_any_mention_of_the_binary_name():
+    # spec 4.3: the guard must test argv[0], not "is the string anywhere in the
+    # command line". This exact command is what ensure_helper_built() spawns,
+    # so a substring match would let THIS TOOL'S OWN BUILD STEP be adopted as
+    # the owner of a nameless display whose long-dead helper's PID it happens
+    # to have inherited -- and reap would then SIGTERM, and SIGKILL, swiftc.
+    swiftc = (
+        "swiftc -O -o /repo/ndi_broadcaster/vdisplay_helper/vdisplay_helper "
+        "/repo/ndi_broadcaster/vdisplay_helper/main.swift"
+    )
+    processes = {4903: ProcessRecord(pid=4903, ppid=1, command=swiftc)}
+
+    [result] = classify([_display(serial=4903)], processes, OURS)
+
+    assert result.verdict == VERDICT_ZOMBIE_B
+    assert result.owner_pid is None
+
+
+def test_a_nameless_display_is_never_attributed_to_a_mere_mention_of_the_binary():
+    # The reachability path for the guard above: a nameless display (the zombie
+    # signature) attributes on serial alone, so a substring match would promote
+    # it to orphan_a purely because some live PID's command line mentions the
+    # helper path -- swiftc, or a `vim`/`grep` open on this repo. Unattributable
+    # here means foreign_virtual, which is never signalled either way; what
+    # matters is that it is not orphan_a and carries no owner to signal.
+    mentions = "vim /repo/ndi_broadcaster/vdisplay_helper/vdisplay_helper.md"
+    processes = {4903: ProcessRecord(pid=4903, ppid=1, command=mentions)}
+    nameless = _display(serial=4903, name=None, in_nsscreen=False, name_source=NAME_SOURCE_NONE)
+
+    [result] = classify([nameless], processes, OURS)
+
+    assert result.verdict != VERDICT_ORPHAN_A
+    assert result.owner_pid is None
+
+
+def test_a_system_profiler_name_alone_does_not_make_a_display_ours():
+    # spec 4.5: system_profiler emits no CGDirectDisplayID, so its names are
+    # paired positionally against the online-ID list -- and only in the zombie
+    # case, where the two orderings are least likely to agree. A real panel
+    # handed our display's name by a mispairing must not become a zombie_b
+    # FAIL on a healthy machine (which would also make `probe` refuse to run).
+    guessed = _display(name=OURS, in_nsscreen=False, name_source=NAME_SOURCE_SYSTEM_PROFILER)
+
+    [result] = classify([guessed], {}, OURS)
+
+    assert result.verdict == VERDICT_FOREIGN_VIRTUAL
+    assert result.owner_pid is None
+
+
+def test_a_system_profiler_name_alone_does_not_make_an_attributable_display_foreign():
+    # The other direction of the same mispairing: the actual zombie handed a
+    # real panel's name must not be written off as foreign_virtual and then
+    # silently never reaped. Its serial still attributes to a live helper under
+    # the 4.3 guard, and that evidence outranks a positional guess.
+    processes = {4903: ProcessRecord(pid=4903, ppid=1, command=HELPER_CMD)}
+    mislabelled = _display(
+        serial=4903,
+        name="LG Ultra HD (2)",
+        in_nsscreen=False,
+        name_source=NAME_SOURCE_SYSTEM_PROFILER,
+    )
+
+    [result] = classify([mislabelled], processes, OURS)
+
+    assert result.verdict == VERDICT_ORPHAN_A
+    assert result.owner_pid == 4903
+
+
+def test_an_nsscreen_name_is_still_authoritative():
+    # The guarantee 4.5 does NOT weaken: NSScreen keys its name by
+    # NSScreenNumber (the CGDirectDisplayID), so it is certainly this
+    # display's own name and still overrides a serial/PID collision.
+    processes = {4903: ProcessRecord(pid=4903, ppid=1, command=HELPER_CMD)}
+    lg = _display(serial=4903, name="LG Ultra HD (2)", name_source=NAME_SOURCE_NSSCREEN)
+
+    [result] = classify([lg], processes, OURS)
+
+    assert result.verdict == VERDICT_REAL
+    assert result.owner_pid is None
+
+
 def test_real_display_is_not_claimed_when_its_serial_collides_with_a_live_helper():
     # spec 2.3: this machine's real LG panels report serials 149094/149084,
     # numerically adjacent to the PID range. A named display that is not ours
@@ -219,7 +306,7 @@ def test_probe_display_name_is_also_recognised_as_ours():
 
 def test_unattributable_display_invisible_to_nsscreen_is_foreign_not_ours():
     # Could be BetterDisplay or DeskPad, legitimately in use. Report, never signal.
-    foreign = _display(name=None, in_nsscreen=False, serial=777)
+    foreign = _display(name=None, in_nsscreen=False, serial=777, name_source=NAME_SOURCE_NONE)
 
     [result] = classify([foreign], {}, OURS)
 
@@ -671,6 +758,72 @@ def test_probe_exits_with_an_internal_error_when_broadcaster_yaml_is_malformed(
     monkeypatch.setenv("BROADCASTER_YAML", str(bad_yaml))
 
     assert main(["probe", "--name", OURS]) == EXIT_ERROR
+
+
+def test_scan_reports_an_internal_error_when_the_process_table_cannot_be_read(monkeypatch, capsys):
+    # read_process_table() runs `ps` with check=True, so any ps failure raises
+    # CalledProcessError. Uncaught, `raise SystemExit(main())` turns that into
+    # a traceback and Python's exit code 1 -- indistinguishable from
+    # EXIT_DIRTY, so a caller scripting `scan || reap` would read "orphans
+    # present" when the truth is "the tool broke".
+    import subprocess as subprocess_module
+
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._collect_displays", list)
+
+    def ps_failed():
+        raise subprocess_module.CalledProcessError(1, ["ps", "-Awwo", "pid=,ppid=,command="])
+
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", ps_failed)
+
+    exit_code = main(["scan", "--name", OURS])
+
+    assert exit_code == EXIT_ERROR
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_scan_reports_an_internal_error_when_pyobjc_is_unavailable(monkeypatch):
+    # The exact scenario the lazy-import architecture exists to accommodate:
+    # _collect_displays() imports display_inventory, which imports AppKit and
+    # Quartz at module scope. On a machine without PyObjC that is an
+    # ImportError, and it must not be reported as a dirty machine.
+    def no_pyobjc():
+        raise ImportError("No module named 'AppKit'")
+
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._collect_displays", no_pyobjc)
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+    assert main(["scan", "--name", OURS]) == EXIT_ERROR
+
+
+def test_keyboard_interrupt_is_not_swallowed_as_an_internal_error(monkeypatch):
+    # The guard catches Exception, deliberately not BaseException: Ctrl-C
+    # during a reap's 5s verify loop must still interrupt the tool rather than
+    # be reported as an internal error and swallowed into an exit code.
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._collect_displays", interrupted)
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+    with pytest.raises(KeyboardInterrupt):
+        main(["scan", "--name", OURS])
+
+
+def test_a_usage_error_exits_with_an_internal_error_not_the_probe_failed_code():
+    # argparse exits 2 on a bad flag, which is this tool's documented code for
+    # "probe failed -- the machine is not fit to start a run" (5.4). A typo
+    # must not raise the one alarm this tool exists to produce.
+    assert main(["scan", "--no-such-flag"]) == EXIT_ERROR
+    assert main(["not-a-command"]) == EXIT_ERROR
+
+
+def test_help_still_exits_zero():
+    # The remap above must key on the exit code, not merely on catching
+    # SystemExit: --help is also a SystemExit, and it means success.
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--help"])
+
+    assert excinfo.value.code == 0
 
 
 def test_scan_with_name_succeeds_even_when_broadcaster_yaml_is_missing(monkeypatch, tmp_path):

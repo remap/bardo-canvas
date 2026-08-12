@@ -32,8 +32,9 @@ from .config import BroadcasterConfig, load_broadcaster_config
 GHOST_VENDOR = 0x756E6B6E  # "unkn"
 GHOST_MODEL = 0x76697274  # "virt"
 
-# Substring-matched against a process's full argument vector, never against
-# `ps -o comm=` -- see read_process_table().
+# Matched against the basename of argv[0] only -- never as a substring of the
+# whole argument vector, and never against `ps -o comm=` (see
+# read_process_table() for why the full vector is collected).
 HELPER_BINARY_NAME = "vdisplay_helper"
 LAUNCHER_MODULE = "ndi_broadcaster.launcher"
 
@@ -53,6 +54,14 @@ VERDICT_FOREIGN_VIRTUAL = "foreign_virtual"
 ACTIONABLE_VERDICTS = frozenset({VERDICT_ORPHAN_A, VERDICT_ZOMBIE_B})
 
 
+# Where a DisplayRecord's `name` came from. The distinction is load-bearing in
+# classify(): only NAME_SOURCE_NSSCREEN is evidence strong enough to decide
+# ours/not-ours (§4.5).
+NAME_SOURCE_NSSCREEN = "nsscreen"
+NAME_SOURCE_SYSTEM_PROFILER = "system_profiler"
+NAME_SOURCE_NONE = "none"
+
+
 @dataclass(frozen=True)
 class DisplayRecord:
     """One entry from CGGetOnlineDisplayList, plus the AppKit-side name.
@@ -62,6 +71,15 @@ class DisplayRecord:
     it can therefore be populated even when `in_nsscreen` is False.
     `in_nsscreen`, not `name`, is the authoritative signal for whether AppKit
     could see the display -- the zombie signature is `in_nsscreen is False`.
+
+    `name_source` records which of the two produced `name`, because they carry
+    very different weight. An NSScreen name is keyed by NSScreenNumber, i.e.
+    by CGDirectDisplayID, so it is definitionally the right display's name. A
+    system_profiler name is paired *positionally* against the online-ID list
+    (system_profiler emits no CGDirectDisplayID at all), across two orderings
+    nothing guarantees agree -- and it is produced only in the zombie case
+    this tool exists for. classify() therefore treats it as a label to print,
+    never as evidence of whose display this is (§4.5).
     """
 
     display_id: int
@@ -75,6 +93,7 @@ class DisplayRecord:
     bounds: tuple[int, int, int, int]
     name: str | None
     in_nsscreen: bool
+    name_source: str
 
 
 @dataclass(frozen=True)
@@ -138,6 +157,23 @@ def read_process_table() -> dict[int, ProcessRecord]:
     return parse_ps_output(completed.stdout)
 
 
+def _is_helper_command(command: str) -> bool:
+    """True only when argv[0]'s basename IS the helper binary.
+
+    Deliberately not a substring test over the whole argument vector: that
+    would be satisfied by `swiftc -O -o .../vdisplay_helper main.swift` -- a
+    command this repo's own ensure_helper_built() spawns -- as well as by any
+    editor or grep that happens to mention the path while working in this
+    tree. Since a nameless display attributes purely on serial, one such
+    live PID colliding with a dead helper's recycled PID would promote a
+    zombie_b to orphan_a and get that unrelated process SIGTERMed (§4.3).
+    """
+    parts = command.split(maxsplit=1)
+    if not parts:
+        return False
+    return Path(parts[0]).name == HELPER_BINARY_NAME
+
+
 def _attributed_owner(serial: int, processes: dict[int, ProcessRecord]) -> ProcessRecord | None:
     """Map a display's serial back to the vdisplay_helper that created it.
 
@@ -152,7 +188,7 @@ def _attributed_owner(serial: int, processes: dict[int, ProcessRecord]) -> Proce
     proc = processes.get(serial)
     if proc is None:
         return None
-    if HELPER_BINARY_NAME not in proc.command:
+    if not _is_helper_command(proc.command):
         return None
     return proc
 
@@ -190,11 +226,14 @@ def classify(
 
         owner = _attributed_owner(display.serial, processes)
 
-        # A known name is authoritative: it is what system_profiler and NSScreen
-        # both report, and it cannot be spoofed by a serial/PID collision. Only
-        # fall back to serial attribution when the name is unavailable, which is
-        # itself the zombie signature (online but invisible to AppKit).
-        if display.name is not None:
+        # An NSScreen name is authoritative: NSScreen keys it by NSScreenNumber
+        # (the CGDirectDisplayID), so it is certainly this display's own name,
+        # and it cannot be spoofed by a serial/PID collision. A system_profiler
+        # name is not: it is paired positionally (§4.5) and is a guess about
+        # *which* display it belongs to, so it decides nothing here and falls
+        # through to the §4.3-guarded serial attribution -- the same path taken
+        # when no name exists at all, which is itself the zombie signature.
+        if display.name is not None and display.name_source == NAME_SOURCE_NSSCREEN:
             is_ours = display.name in our_names
         else:
             is_ours = owner is not None
@@ -551,7 +590,7 @@ def _scan(display_name: str) -> tuple[list[Classification], int]:
     return classifications, EXIT_DIRTY if dirty else EXIT_CLEAN
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m ndi_broadcaster.vdisplay_doctor",
         description="Detect, reclaim, and pre-flight-check virtual displays.",
@@ -567,8 +606,39 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="let `probe` run even when orphans or zombies are already present",
     )
-    args = parser.parse_args(argv)
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        # argparse exits 2 on a usage error, which is this tool's documented
+        # code for "probe failed -- the machine is not fit to start a run"
+        # (§5.4). A mistyped flag must not raise that alarm, so remap it to
+        # EXIT_ERROR. --help's exit 0 is left exactly as argparse produced it.
+        if exc.code in (0, None):
+            raise
+        return EXIT_ERROR
+
+    try:
+        return _dispatch(args)
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # Every I/O source under _dispatch can fail in a way argparse never
+        # sees: read_process_table() runs `ps` with check=True, _collect_displays()
+        # imports PyObjC (absent on exactly the machines the lazy-import
+        # architecture exists to accommodate) and then calls into Quartz.
+        # Uncaught, each of those exits 1 -- indistinguishable from EXIT_DIRTY,
+        # so a caller scripting `scan || reap` would read "orphans present"
+        # when the truth is "the tool broke". Exception, not BaseException:
+        # Ctrl-C must still interrupt rather than be reported as an internal
+        # error.
+        print(f"ERROR  {type(exc).__name__}: {exc}")
+        return EXIT_ERROR
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     # Loaded exactly once, up front, and guarded here -- not at each of the two
     # places (name resolution, probe's width/height) that would otherwise load
     # it separately. That closes the exit-code collision an unguarded second
