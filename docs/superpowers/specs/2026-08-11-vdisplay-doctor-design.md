@@ -38,6 +38,31 @@ ARC deinit inside the process holding the last strong reference — exactly what
 is not expressible as an operation. The only available levers are reaping the
 owning process, or resetting WindowServer wholesale.
 
+**Invariant (SIGTERM-only teardown).** ARC-deinit-only teardown is not merely
+an implementation note; it is a rule about which signals this codebase may
+send. `shutdownAndExit()` is wired to `SIGINT` and `SIGTERM` via
+`DispatchSource`, and it is the *only* code path that sets `display = nil` and
+so drops the CGVirtualDisplay's refcount to zero. **`SIGKILL` cannot be caught
+and runs no handler at all.** Therefore:
+
+> **`SIGTERM` is the only signal that tears a virtual display down. `SIGKILL`
+> manufactures an unreclaimable `zombie_b` (§4.2): a live display in
+> WindowServer whose owning process is dead, which by §2.1 nothing can remove.
+> `SIGKILL` is permissible only as an *escalation*, after a `SIGTERM` has
+> actually been sent and given time to work.**
+
+The counter-intuitive corollary is worth stating plainly, because it is the
+part that gets coded wrong: on any path where a helper has already created its
+display, `proc.kill()` is **strictly worse than doing nothing**. Leaving the
+helper alive produces `orphan_a`, which `reap` reclaims in seconds; killing it
+produces `zombie_b`, whose remedy ladder starts at "wait it out" and tops out
+at a reboot (§2.4). The correct shape everywhere — `start_vdisplay_helper`'s
+failure paths, `probe`'s cleanup, `launcher.py`'s `finally`, and §5.2's reap
+ladder — is `terminate()` → bounded `wait()` → `kill()` only on timeout. This
+is precisely why §5.2's ladder is SIGTERM-then-SIGKILL and never SIGKILL
+alone: rung 2 exists only for a helper that has proven it will not honour rung
+1, at which point the display is already lost either way.
+
 **2.2 `serialNum` already carries the owning PID.** `main.swift` sets
 `descriptor.serialNum = UInt32(ProcessInfo.processInfo.processIdentifier)`.
 `CGDisplaySerialNumber(displayID)` therefore returns the PID of the
@@ -110,10 +135,13 @@ Out of scope, deliberately:
 - `run.sh` is not modified. This is a standalone tool, invoked by hand before
   and after runs as needed.
 - No destructive escalation rungs (§2.4).
-- No changes to `main.swift`, `virtual_display.py`, `launcher.py`, or
-  `config.py`. `probe` consumes the existing startup path as-is; that it does
-  so unmodified is what makes it a regression test for the §10
-  `shutdownAndExit()` fix rather than a parallel reimplementation of it.
+- No changes to `main.swift`, `launcher.py`, or `config.py`. `probe` consumes
+  the existing startup path as-is; that it does so unmodified is what makes it
+  a regression test for the §10 `shutdownAndExit()` fix rather than a parallel
+  reimplementation of it. (`virtual_display.py` was originally listed here too.
+  It has since been amended, but only to make its own failure paths honour
+  §2.1's SIGTERM-only invariant — the create/settle/teardown sequence `probe`
+  exercises is unchanged.)
 
 ## 4. Classification
 
@@ -280,6 +308,17 @@ was torn down" are different claims, and only the second is what matters —
 while leaking its display. Verifying the process is not verifying the fix.
 
 3. Still present after 5s: `SIGKILL`, re-verify.
+
+The ladder starts at `SIGTERM` and reaches `SIGKILL` only after it, because of
+§2.1's SIGTERM-only invariant: `SIGTERM` runs `shutdownAndExit()` and is the
+only thing that tears the display down, while `SIGKILL` runs no handler and
+would convert a reclaimable `orphan_a` into an unreclaimable `zombie_b`. Rung 2
+is a last resort for a helper that has demonstrably ignored rung 1 — at which
+point the display is lost either way and at least the process is reclaimed.
+The same terminate → bounded wait → kill shape is required of every other
+teardown path in the codebase (§2.1).
+
+
 4. Still present, or any `zombie_b` exists: print the ladder, exit 1.
 
 ```

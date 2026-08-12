@@ -365,6 +365,7 @@ def probe(
     # is imported later still, just before the teardown poll, so a failure in
     # build/create/settle never needs PyObjC at all.
     from .virtual_display import (
+        _terminate_helper,
         ensure_helper_built,
         start_vdisplay_helper,
         wait_for_settled_bounds,
@@ -403,11 +404,7 @@ def probe(
         from .display_inventory import online_display_ids
 
         started = time.monotonic()
-        proc.terminate()
-        try:
-            proc.wait(timeout=teardown_timeout_s)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _terminate_helper(proc, teardown_timeout_s)
         deadline = time.monotonic() + teardown_timeout_s
         try:
             while time.monotonic() < deadline:
@@ -435,9 +432,16 @@ def probe(
             "was terminated -- shutdownAndExit()'s ARC release may have regressed",
         )
     finally:
-        # Never leave a probe display behind, whichever phase failed.
+        # Never leave a probe display behind, whichever phase failed -- and
+        # SIGTERM, not SIGKILL, because only the handler tears the display
+        # down (§2.1). A failed `settle` is the case that matters: `create`
+        # already succeeded and returned a real displayID, so the display is
+        # definitely live, and SIGKILLing here would leave the health gate
+        # manufacturing exactly the zombie_b it exists to detect -- which
+        # probe's own "refuses a poisoned machine" guard would then read as a
+        # reason to refuse the next run.
         if proc is not None:
-            proc.kill()
+            _terminate_helper(proc, teardown_timeout_s)
 
 
 EXIT_CLEAN = 0

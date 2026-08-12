@@ -370,11 +370,15 @@ def test_reap_tolerates_an_owner_that_already_exited():
 from ndi_broadcaster.vdisplay_doctor import probe
 
 
-def test_probe_kills_the_helper_when_a_phase_fails_so_no_probe_display_leaks(monkeypatch):
-    # The failure path is the one that matters: a probe that dies in `settle`
-    # and leaves its helper running has leaked exactly the kind of display this
-    # whole tool exists to detect. Fakes stand in for the real startup path, so
-    # this runs with no display server.
+def test_probe_terminates_the_helper_when_a_phase_fails_so_no_probe_display_leaks(monkeypatch):
+    # The failure path is the one that matters, and SIGTERM is the only signal
+    # that helps: spec 5.2 -- "'the process exited' and 'the display was torn
+    # down' are different claims... Verifying the process is not verifying the
+    # fix." By the time `settle` fails, `create` has already returned a real
+    # displayID, so the display is definitely live; SIGKILL runs no handler in
+    # main.swift, so killing here would leave the health gate manufacturing a
+    # zombie_b every time it fails. Fakes stand in for the real startup path,
+    # so this runs with no display server.
     import ndi_broadcaster.virtual_display as vd
     from ndi_broadcaster.virtual_display import DisplayInfo
 
@@ -409,7 +413,8 @@ def test_probe_kills_the_helper_when_a_phase_fails_so_no_probe_display_leaks(mon
 
     assert not result.ok
     assert result.failure_phase == "settle"
-    assert fake_proc.killed, "a failed probe must not leave its helper running"
+    assert fake_proc.terminated, "a failed probe must tear its display down, not orphan it"
+    assert not fake_proc.killed, "SIGKILL runs no handler, so it would leak the probe display"
 
 
 def test_probe_reports_the_phase_that_failed_when_the_helper_never_starts(monkeypatch):

@@ -53,6 +53,24 @@ def ensure_helper_built(helper_dir: Path) -> Path:
     return binary_path
 
 
+def _terminate_helper(proc: subprocess.Popen, timeout_s: float = 5.0) -> None:
+    """SIGTERM the helper and wait, falling back to SIGKILL only if it ignores us.
+
+    SIGTERM is the only signal that tears the virtual display down: main.swift
+    handles it via shutdownAndExit(), which releases the CGVirtualDisplay so
+    ARC's deinit runs. SIGKILL runs no handler at all, so killing outright
+    leaves a live display in WindowServer with a dead owner -- an
+    unreclaimable zombie, since the private CGVirtualDisplay API has no
+    remove-by-ID call. Leaving the helper alive would at least be reclaimable;
+    killing it is strictly worse. See the sck design spec's section 10.
+    """
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def start_vdisplay_helper(
     binary_path: Path, width: int, height: int, name: str, timeout_s: float = 15.0
 ) -> tuple[subprocess.Popen, DisplayInfo]:
@@ -78,7 +96,10 @@ def start_vdisplay_helper(
     try:
         line = line_queue.get(timeout=timeout_s)
     except queue.Empty:
-        proc.kill()
+        # A 15s stall almost certainly means the helper HAS already created and
+        # applied its display and is merely slow to report it, so this is the
+        # likeliest path to manufacture a zombie -- terminate, never kill.
+        _terminate_helper(proc)
         raise TimeoutError(
             f"vdisplay_helper did not report its startup status within {timeout_s}s"
         ) from None
@@ -97,9 +118,11 @@ def start_vdisplay_helper(
     except BaseException:
         # Every path out of here leaves `proc` alive but unreturned, so no
         # caller-side finally can reach it -- launcher.py's own cleanup is
-        # keyed on the tuple assignment that never happened. Killing here is
-        # the only place the leak can be closed.
-        proc.kill()
+        # keyed on the tuple assignment that never happened. Shutting the
+        # helper down here is the only place the leak can be closed, and the
+        # JSONDecodeError/KeyError paths run *after* the helper reported a
+        # displayID, so the display is definitely live by then.
+        _terminate_helper(proc)
         raise
     return proc, info
 
