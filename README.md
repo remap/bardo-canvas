@@ -158,9 +158,10 @@ Requirements:
   observed becoming unreliable while this machine's display was asleep (idle
   timeout; CLI activity doesn't count as user activity to macOS). If startup hangs
   with `vdisplay_helper did not report its startup status within 15.0s`, this is
-  the first thing to check, followed by zombie virtual displays — see
-  `docs/superpowers/specs/2026-08-10-sck-capture-backend-design.md` §10 for the
-  full investigation, known fixes, and the one failure mode with no found
+  the first thing to check, followed by zombie virtual displays — run
+  `python -m ndi_broadcaster.vdisplay_doctor scan` (below) rather than guessing.
+  `docs/superpowers/specs/2026-08-10-sck-capture-backend-design.md` §10 has the
+  full investigation, the fixed leaks, and the one failure mode with no found
   terminal-only remedy (waiting it out was the only thing that worked).
 
 See `docs/bugs.md` for open issues, including a shutdown hang that can leave
@@ -169,23 +170,32 @@ indefinitely after a stop.
 
 ### Checking for zombie virtual displays
 
-The `sck`/`virtual` backend creates a virtual display via a private macOS API
-that has no remove-by-ID call — a display can only be torn down by the process
-that created it. If that process is killed uncleanly the display can outlive
-it, and enough accumulated zombies make every subsequent virtual display hang
-at creation.
+The `sck`/`virtual` backend creates its display via a private macOS API that has
+no remove-by-ID call — a display can only be torn down by the process that
+created it. If that process dies without running its teardown path the display
+outlives it, and enough accumulated zombies make every subsequent virtual
+display hang at creation, blocking the backend entirely.
+
+`vdisplay_doctor` detects that state, reclaims what can be reclaimed, and
+answers whether the machine is fit to start a run:
 
 ```bash
 python -m ndi_broadcaster.vdisplay_doctor scan    # read-only, ~0.5s, safe any time
-python -m ndi_broadcaster.vdisplay_doctor reap    # SIGTERM orphaned helpers, verify
-python -m ndi_broadcaster.vdisplay_doctor probe   # ~5-8s create/teardown health gate
+python -m ndi_broadcaster.vdisplay_doctor reap    # reclaim orphans, verify they're gone
+python -m ndi_broadcaster.vdisplay_doctor probe   # ~5s create/teardown health gate
 ```
 
 Exit codes: `0` clean, `1` orphan or zombie present, `2` probe failed, `3` error.
 
-Run `probe` before a long broadcast to confirm the machine is fit, and `reap`
-after an unclean stop. `reap` never touches a display that is serving a live
-broadcast, so it is safe to run at any time.
+Run `probe` before a long broadcast and `reap` after an unclean stop. `reap`
+never touches a display serving a live broadcast, so it is safe at any time —
+but note it deliberately will not touch a helper whose launcher is still alive,
+so after the shutdown hang below you must `kill -9` the launcher *first*.
+
+**See [`docs/vdisplay-doctor.md`](docs/vdisplay-doctor.md)** for the verdict
+taxonomy, the escalation ladder, the recipes, and what the tool provably cannot
+do (a display whose owning process is already dead cannot be reclaimed by
+anything).
 
 Additional `broadcaster.yaml` fields this backend uses:
 
