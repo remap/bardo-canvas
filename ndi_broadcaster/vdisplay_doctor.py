@@ -12,6 +12,7 @@ See docs/superpowers/specs/2026-08-11-vdisplay-doctor-design.md.
 
 from __future__ import annotations
 
+import argparse
 import os
 import signal
 import subprocess
@@ -19,6 +20,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from .config import load_broadcaster_config
 
 # macOS synthesizes its own 640x480 ghost display, confirmed by Apple DTS in
 # developer.apple.com/forums/thread/787154. The numbers are legacy Classic-era
@@ -433,3 +436,172 @@ def probe(
         # Never leave a probe display behind, whichever phase failed.
         if proc is not None:
             proc.kill()
+
+
+EXIT_CLEAN = 0
+EXIT_DIRTY = 1
+EXIT_PROBE_FAILED = 2
+EXIT_ERROR = 3
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+LADDER = """
+rung 1  SIGTERM owner  -> verify display gone   [auto, attempted]
+rung 2  SIGKILL owner  -> verify display gone   [auto, attempted]
+------------------------------- stop -------------------------------
+rung 3  wait it out (minutes..overnight)        [advise]
+rung 4  log out / log back in                   [advise]
+rung 5  reboot                                  [advise]
+
+No API exists to remove a virtual display you do not own: the private
+CGVirtualDisplay surface has no remove-by-ID call, and teardown happens only
+via ARC deinit inside the owning process. Restarting WindowServer, colorsyncd,
+or DisplaysExt were all tried live and none cleared this state.
+""".strip()
+
+
+def broadcaster_yaml_path(env: dict[str, str]) -> Path:
+    """Resolve BROADCASTER_YAML the same way launcher.resolve_launcher_paths does.
+
+    Deliberately re-derived rather than imported: launcher.py imports
+    playwright, numpy, httpx and cyndilib at module scope, which is far too
+    heavy for a tool whose whole point is a sub-second answer. The duplication
+    is one env var with one default, and a test asserts the two agree so they
+    cannot drift.
+    """
+    return Path(env.get("BROADCASTER_YAML", str(REPO_ROOT / "config" / "broadcaster.yaml")))
+
+
+def _resolve_display_name(explicit: str | None) -> str:
+    """--name wins, so scan/reap work with no config file present at all."""
+    if explicit is not None:
+        return explicit
+    return load_broadcaster_config(broadcaster_yaml_path(dict(os.environ))).sck_virtual_display_name
+
+
+# Indirected through module-level functions so tests can monkeypatch them
+# without importing PyObjC.
+def _collect_displays() -> list[DisplayRecord]:
+    from .display_inventory import collect_displays
+
+    return collect_displays()
+
+
+def _online_display_ids() -> set[int]:
+    from .display_inventory import online_display_ids
+
+    return online_display_ids()
+
+
+def format_table(classifications: list[Classification]) -> str:
+    header = f"{'display':<10} {'verdict':<16} {'owner':<7} name"
+    lines = [header]
+    for item in classifications:
+        owner = "-" if item.owner_pid is None else str(item.owner_pid)
+        name = item.display.name or "(unnamed)"
+        lines.append(f"{item.display.display_id:<10} {item.verdict:<16} {owner:<7} {name}")
+    return "\n".join(lines)
+
+
+def _summarise(classifications: list[Classification]) -> str:
+    counts: dict[str, int] = {}
+    for item in classifications:
+        counts[item.verdict] = counts.get(item.verdict, 0) + 1
+    orphans = counts.get(VERDICT_ORPHAN_A, 0)
+    zombies = counts.get(VERDICT_ZOMBIE_B, 0)
+    if orphans or zombies:
+        return f"FAIL  {orphans} orphaned (reclaimable), {zombies} zombie (unreclaimable)"
+    return (
+        f"OK  {counts.get(VERDICT_REAL, 0)} real, "
+        f"{counts.get(VERDICT_ACTIVE, 0)} active, 0 orphaned"
+    )
+
+
+def _scan(display_name: str) -> tuple[list[Classification], int]:
+    classifications = classify(_collect_displays(), read_process_table(), display_name)
+    print(format_table(classifications))
+    for item in classifications:
+        if item.verdict == VERDICT_FOREIGN_VIRTUAL:
+            print(f"WARN  display {item.display.display_id}: {item.detail}")
+        if item.display.is_asleep:
+            # Section 10 of the sck spec records display sleep correlating with
+            # CGVirtualDisplay creation becoming unreliable.
+            print(
+                f"WARN  display {item.display.display_id} is asleep; "
+                "consider `caffeinate -d` for the duration of a broadcast"
+            )
+    print(_summarise(classifications))
+    dirty = any(item.verdict in ACTIONABLE_VERDICTS for item in classifications)
+    return classifications, EXIT_DIRTY if dirty else EXIT_CLEAN
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m ndi_broadcaster.vdisplay_doctor",
+        description="Detect, reclaim, and pre-flight-check virtual displays.",
+    )
+    parser.add_argument("command", choices=["scan", "reap", "probe"])
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="virtual display name to treat as ours (default: from broadcaster.yaml)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="let `probe` run even when orphans or zombies are already present",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        display_name = _resolve_display_name(args.name)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR  could not resolve the virtual display name: {exc}")
+        return EXIT_ERROR
+
+    classifications, scan_code = _scan(display_name)
+
+    if args.command == "scan":
+        return scan_code
+
+    if args.command == "reap":
+        results = reap_orphans(
+            classifications,
+            signal_process=signal_process,
+            list_display_ids=_online_display_ids,
+        )
+        for result in results:
+            print(
+                f"{result.outcome}  display {result.display_id} "
+                f"(owner {result.owner_pid}) after {result.elapsed_s:.1f}s"
+            )
+        remaining = [item for item in classifications if item.verdict == VERDICT_ZOMBIE_B] + [
+            r for r in results if r.outcome == UNRECLAIMABLE
+        ]
+        if remaining:
+            print(LADDER)
+            return EXIT_DIRTY
+        return EXIT_CLEAN
+
+    if scan_code == EXIT_DIRTY and not args.force:
+        print(
+            "ERROR  refusing to probe: orphans or zombies are already present, so a "
+            "probe would report nothing trustworthy and risks adding to the "
+            "accumulation that causes the startup hang. Re-run with --force to override."
+        )
+        return EXIT_DIRTY
+
+    config = load_broadcaster_config(broadcaster_yaml_path(dict(os.environ)))
+    result = probe(
+        config.width,
+        config.height,
+        helper_dir=REPO_ROOT / "ndi_broadcaster" / "vdisplay_helper",
+    )
+    for phase, seconds in result.timings.items():
+        print(f"{phase:<9} {seconds:.1f}s")
+    print(("OK  " if result.ok else f"FAIL [{result.failure_phase}]  ") + result.message)
+    return EXIT_CLEAN if result.ok else EXIT_PROBE_FAILED
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

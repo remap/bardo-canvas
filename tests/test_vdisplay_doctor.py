@@ -468,3 +468,119 @@ def test_probe_returns_a_failure_result_instead_of_raising_when_the_teardown_pol
     assert not result.ok
     assert result.failure_phase == "teardown"
     assert "CoreGraphics call failed" in result.message
+
+
+from ndi_broadcaster.vdisplay_doctor import (
+    EXIT_CLEAN,
+    EXIT_DIRTY,
+    EXIT_PROBE_FAILED,
+    ProbeResult,
+    broadcaster_yaml_path,
+    format_table,
+    main,
+)
+
+
+def test_broadcaster_yaml_path_matches_the_launchers_own_resolution():
+    # This module deliberately re-derives one env-var default rather than
+    # importing launcher.py (which pulls in playwright, numpy and cyndilib at
+    # module scope, far too heavy for a sub-second scan). This test pins the
+    # duplication so the two cannot drift apart silently.
+    from ndi_broadcaster.launcher import resolve_launcher_paths
+
+    for env in ({}, {"BROADCASTER_YAML": "/tmp/custom.yaml"}):
+        assert broadcaster_yaml_path(env) == resolve_launcher_paths(env).broadcaster_yaml
+
+
+def test_format_table_shows_verdict_owner_and_name_for_each_display():
+    rows = [
+        Classification(
+            _display(display_id=1, is_builtin=True, name="Built-in Retina Display"),
+            VERDICT_REAL,
+            None,
+            "built-in display",
+        ),
+        Classification(_display(display_id=2, serial=4903), VERDICT_ORPHAN_A, 4903, "reparented"),
+    ]
+
+    text = format_table(rows)
+
+    assert "Built-in Retina Display" in text
+    assert VERDICT_ORPHAN_A in text
+    assert "4903" in text
+
+
+def test_scan_exits_clean_on_a_healthy_machine(monkeypatch):
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(display_id=1, is_builtin=True, name="Built-in Retina Display")],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+    assert main(["scan", "--name", OURS]) == EXIT_CLEAN
+
+
+def test_scan_exits_dirty_when_a_zombie_is_present(monkeypatch):
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(serial=4110)],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+    assert main(["scan", "--name", OURS]) == EXIT_DIRTY
+
+
+def test_reap_exits_dirty_when_an_unreclaimable_zombie_remains(monkeypatch):
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(serial=4110)],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._online_display_ids", lambda: {69732865})
+
+    assert main(["reap", "--name", OURS]) == EXIT_DIRTY
+
+
+def test_probe_refuses_to_run_on_a_dirty_machine(monkeypatch):
+    # A probe against an already-stuck WindowServer reports nothing
+    # trustworthy, and risks adding to the accumulation that causes the hang.
+    called = []
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(serial=4110)],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor.probe",
+        lambda *a, **k: called.append(1),
+    )
+
+    assert main(["probe", "--name", OURS]) == EXIT_DIRTY
+    assert called == []
+
+
+def test_probe_force_overrides_the_dirty_machine_refusal(monkeypatch):
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(serial=4110)],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor.probe",
+        lambda *a, **k: ProbeResult(ok=False, timings={}, failure_phase="settle", message="nope"),
+    )
+
+    assert main(["probe", "--name", OURS, "--force"]) == EXIT_PROBE_FAILED
+
+
+def test_probe_exit_code_distinguishes_broken_from_dirty(monkeypatch):
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._collect_displays", list)
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor.probe",
+        lambda *a, **k: ProbeResult(
+            ok=True, timings={"build": 0.0}, failure_phase=None, message="ok"
+        ),
+    )
+
+    assert main(["probe", "--name", OURS]) == EXIT_CLEAN
