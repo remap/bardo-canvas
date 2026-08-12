@@ -239,3 +239,127 @@ def test_classify_preserves_input_order_and_length():
     ]
 
     assert _verdicts(displays, {}) == [VERDICT_REAL, VERDICT_REAL, VERDICT_ZOMBIE_B]
+
+
+import signal as signal_module
+
+from ndi_broadcaster.vdisplay_doctor import (
+    REAPED_SIGKILL,
+    REAPED_SIGTERM,
+    UNRECLAIMABLE,
+    Classification,
+    reap_orphans,
+)
+
+
+def _orphan(display_id=69732865, owner_pid=4903):
+    return Classification(
+        display=_display(display_id=display_id, serial=owner_pid),
+        verdict=VERDICT_ORPHAN_A,
+        owner_pid=owner_pid,
+        detail="test orphan",
+    )
+
+
+class _FakeWorld:
+    """Records signals, and drops displays only when the fake helper complies."""
+
+    def __init__(self, present, obeys=signal_module.SIGTERM):
+        self.present = set(present)
+        self.obeys = obeys
+        self.signals = []
+
+    def signal_process(self, pid, sig):
+        self.signals.append((pid, sig))
+        if self.obeys is not None and sig == self.obeys:
+            self.present.discard(69732865)
+
+    def list_display_ids(self):
+        return set(self.present)
+
+
+def _run(world, classifications):
+    return reap_orphans(
+        classifications,
+        signal_process=world.signal_process,
+        list_display_ids=world.list_display_ids,
+        verify_timeout_s=1.0,
+        poll_interval_s=0.1,
+        sleep=lambda _s: None,
+        monotonic=_FakeClock(),
+    )
+
+
+class _FakeClock:
+    """Advances 0.1s per call so timeout loops terminate without real waiting."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        self.now += 0.1
+        return self.now
+
+
+def test_reap_sigterms_the_owner_and_confirms_the_display_disappeared():
+    world = _FakeWorld(present={69732865})
+
+    [result] = _run(world, [_orphan()])
+
+    assert result.outcome == REAPED_SIGTERM
+    assert world.signals == [(4903, signal_module.SIGTERM)]
+    assert 69732865 not in world.list_display_ids()
+
+
+def test_reap_escalates_to_sigkill_when_sigterm_is_ignored():
+    world = _FakeWorld(present={69732865}, obeys=signal_module.SIGKILL)
+
+    [result] = _run(world, [_orphan()])
+
+    assert result.outcome == REAPED_SIGKILL
+    assert world.signals == [
+        (4903, signal_module.SIGTERM),
+        (4903, signal_module.SIGKILL),
+    ]
+
+
+def test_reap_reports_unreclaimable_when_the_display_never_disappears():
+    # Must not hang, and must not claim success just because signals were sent.
+    world = _FakeWorld(present={69732865}, obeys=None)
+
+    [result] = _run(world, [_orphan()])
+
+    assert result.outcome == UNRECLAIMABLE
+    assert world.signals == [
+        (4903, signal_module.SIGTERM),
+        (4903, signal_module.SIGKILL),
+    ]
+
+
+def test_reap_never_signals_active_or_zombie_or_foreign_displays():
+    world = _FakeWorld(present={1, 2, 3})
+    untouchable = [
+        Classification(_display(display_id=1), VERDICT_ACTIVE, 4903, "live broadcast"),
+        Classification(_display(display_id=2), VERDICT_ZOMBIE_B, None, "owner gone"),
+        Classification(_display(display_id=3), VERDICT_FOREIGN_VIRTUAL, None, "someone else's"),
+        Classification(_display(display_id=4), VERDICT_REAL, None, "physical"),
+    ]
+
+    results = _run(world, untouchable)
+
+    assert results == []
+    assert world.signals == []
+
+
+def test_reap_tolerates_an_owner_that_already_exited():
+    world = _FakeWorld(present={69732865})
+
+    def raise_process_lookup(pid, sig):
+        world.signals.append((pid, sig))
+        raise ProcessLookupError
+
+    world.signal_process = raise_process_lookup
+
+    [result] = _run(world, [_orphan()])
+
+    assert result.outcome == UNRECLAIMABLE

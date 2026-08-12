@@ -12,7 +12,11 @@ See docs/superpowers/specs/2026-08-11-vdisplay-doctor-design.md.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # macOS synthesizes its own 640x480 ghost display, confirmed by Apple DTS in
@@ -234,5 +238,86 @@ def classify(
                     f"helper {owner.pid} reparented to ppid {owner.ppid}; its launcher is gone",
                 )
             )
+
+    return results
+
+
+REAPED_SIGTERM = "reaped_sigterm"
+REAPED_SIGKILL = "reaped_sigkill"
+UNRECLAIMABLE = "unreclaimable"
+
+
+@dataclass(frozen=True)
+class ReapResult:
+    display_id: int
+    owner_pid: int
+    outcome: str
+    elapsed_s: float
+
+
+def signal_process(pid: int, sig: int) -> None:
+    """Send one signal, treating an already-exited target as a no-op."""
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def reap_orphans(
+    classifications: list[Classification],
+    *,
+    signal_process: Callable[[int, int], None],
+    list_display_ids: Callable[[], set[int]],
+    verify_timeout_s: float = 5.0,
+    poll_interval_s: float = 0.25,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> list[ReapResult]:
+    """SIGTERM, then SIGKILL, each orphan_a owner -- verifying after each that
+    the DISPLAY is gone, not merely that the process exited.
+
+    Those are different claims. main.swift's pre-fix bug was precisely a helper
+    that exited cleanly while leaking its display in WindowServer, so checking
+    the process would check nothing. Only orphan_a is ever signalled: `active`
+    displays are serving a live broadcast, `foreign_virtual` displays belong to
+    another tool, and `zombie_b` has no owner left to signal.
+    """
+    results: list[ReapResult] = []
+
+    for item in classifications:
+        if item.verdict != VERDICT_ORPHAN_A or item.owner_pid is None:
+            continue
+
+        display_id = item.display.display_id
+        owner_pid = item.owner_pid
+        started = monotonic()
+        outcome = UNRECLAIMABLE
+
+        for sig, success in (
+            (signal.SIGTERM, REAPED_SIGTERM),
+            (signal.SIGKILL, REAPED_SIGKILL),
+        ):
+            try:
+                signal_process(owner_pid, sig)
+            except ProcessLookupError:
+                pass
+
+            deadline = monotonic() + verify_timeout_s
+            while monotonic() < deadline:
+                if display_id not in list_display_ids():
+                    outcome = success
+                    break
+                sleep(poll_interval_s)
+            if outcome != UNRECLAIMABLE:
+                break
+
+        results.append(
+            ReapResult(
+                display_id=display_id,
+                owner_pid=owner_pid,
+                outcome=outcome,
+                elapsed_s=monotonic() - started,
+            )
+        )
 
     return results
