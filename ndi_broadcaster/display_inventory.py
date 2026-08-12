@@ -61,8 +61,9 @@ def recover_names_via_system_profiler(display_ids: list[int]) -> dict[int, str]:
     construction, and used only to label a display that would otherwise be
     reported unnamed. Records built from these names carry
     name_source=NAME_SOURCE_SYSTEM_PROFILER precisely so that classify() can
-    honour that limit rather than treating a guessed pairing as proof of
-    ownership (spec §4.5).
+    weight a guessed pairing correctly: enough to report a display as ours
+    (pinned to the report-only zombie_b verdict), never enough to signal one
+    (spec §4.5).
 
     Takes the caller's already-collected ID list rather than re-querying
     Quartz: this function reads no display state itself, so it has no

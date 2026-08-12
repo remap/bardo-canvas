@@ -55,8 +55,9 @@ ACTIONABLE_VERDICTS = frozenset({VERDICT_ORPHAN_A, VERDICT_ZOMBIE_B})
 
 
 # Where a DisplayRecord's `name` came from. The distinction is load-bearing in
-# classify(): only NAME_SOURCE_NSSCREEN is evidence strong enough to decide
-# ours/not-ours (§4.5).
+# classify(): NAME_SOURCE_NSSCREEN is strong enough to decide ours/not-ours
+# outright, while NAME_SOURCE_SYSTEM_PROFILER is only strong enough to REPORT a
+# display as ours (pinned to zombie_b) -- never to SIGNAL one (§4.5).
 NAME_SOURCE_NSSCREEN = "nsscreen"
 NAME_SOURCE_SYSTEM_PROFILER = "system_profiler"
 NAME_SOURCE_NONE = "none"
@@ -74,12 +75,16 @@ class DisplayRecord:
 
     `name_source` records which of the two produced `name`, because they carry
     very different weight. An NSScreen name is keyed by NSScreenNumber, i.e.
-    by CGDirectDisplayID, so it is definitionally the right display's name. A
-    system_profiler name is paired *positionally* against the online-ID list
-    (system_profiler emits no CGDirectDisplayID at all), across two orderings
-    nothing guarantees agree -- and it is produced only in the zombie case
-    this tool exists for. classify() therefore treats it as a label to print,
-    never as evidence of whose display this is (§4.5).
+    by CGDirectDisplayID, so it is definitionally the right display's name,
+    and classify() lets it decide ours/not-ours outright, reaching any
+    verdict. A system_profiler name is paired *positionally* against the
+    online-ID list (system_profiler emits no CGDirectDisplayID at all), across
+    two orderings nothing guarantees agree -- and it is produced only in the
+    zombie case this tool exists for. classify() still treats a matching
+    system_profiler name as evidence of ownership, but only enough to pin the
+    display to the report-only zombie_b verdict; it can never promote a
+    display to orphan_a or active, the two verdicts that cause a signal to be
+    sent (§4.5).
     """
 
     display_id: int
@@ -615,6 +620,13 @@ def _scan(display_name: str) -> tuple[list[Classification], int]:
     for item in classifications:
         if item.verdict == VERDICT_FOREIGN_VIRTUAL:
             print(f"WARN  display {item.display.display_id}: {item.detail}")
+        if item.verdict == VERDICT_ZOMBIE_B:
+            # zombie_b means the machine is poisoned and this tool cannot fix
+            # it (§4.5/§7): FAIL, not WARN. Its detail says whether that rests
+            # on serial attribution or a guessed system_profiler name -- the
+            # two provenances carry different confidence, and an operator
+            # deciding whether to wait or reboot deserves to see which one.
+            print(f"FAIL  display {item.display.display_id}: {item.detail}")
         if item.display.is_asleep:
             # Section 10 of the sck spec records display sleep correlating with
             # CGVirtualDisplay creation becoming unreliable.

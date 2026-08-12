@@ -292,18 +292,21 @@ confirms zombies remain visible there long after their helper processes exit.
 A healthy machine never pays this cost, keeping `scan` sub-second in the common
 case.
 
-**A recovered name labels; it does not decide.** This spec originally mandated
-the fallback without defining an ID mapping, and there is no reliable one to
-define: `system_profiler SPDisplaysDataType` emits no `CGDirectDisplayID` on
-any entry, so the only available pairing is **positional** — the
-`CGGetOnlineDisplayList` order against a per-GPU `spdisplays_ndrvs` order that
-nothing guarantees agrees with it. And the fallback runs *only* when
-`len(online) > len(NSScreen)`, i.e. exactly in the disordered zombie case it
-exists to serve. A mispairing is therefore not hypothetical, and it breaks
-attribution in both directions: a real panel handed our display's name becomes
-a false `zombie_b` FAIL on a healthy machine (and §5.3's "refuses a poisoned
-machine" guard then blocks the next run), while the actual zombie handed a real
-panel's name becomes `foreign_virtual` and is silently never reaped.
+**A recovered name is evidence of ownership, not authority to signal.** This
+spec originally mandated the fallback without defining an ID mapping, and
+there is no reliable one to define:
+`system_profiler SPDisplaysDataType` emits no `CGDirectDisplayID` on any entry,
+so the only available pairing is **positional** — the `CGGetOnlineDisplayList`
+order against a per-GPU `spdisplays_ndrvs` order that nothing guarantees
+agrees with it. And the fallback runs *only* when `len(online) > len(NSScreen)`,
+i.e. exactly in the disordered zombie case it exists to serve. A mispairing is
+therefore not hypothetical: a real panel handed our display's name becomes a
+`zombie_b` FAIL on a healthy machine. §7 accepts that outcome as the
+deliberate cost of the asymmetric rule below — it is a false positive, not a
+false negative, and it fails in the safe direction. The direction that is
+never accepted is the other one: the actual zombie handed a real panel's name
+becoming `foreign_virtual` and silently never reaped, which is exactly what an
+unweighted reading of "a guessed name decides nothing" would produce.
 
 `DisplayRecord` therefore carries a **`name_source`** field —
 `"nsscreen"` / `"system_profiler"` / `"none"` — and §4.2's "ours" test consults

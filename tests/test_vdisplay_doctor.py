@@ -472,6 +472,34 @@ def test_a_system_profiler_named_display_is_never_signalled_even_with_a_live_own
     assert world.signals == [], "no signal may be sent on the strength of a guessed name"
 
 
+def test_a_system_profiler_named_display_stays_zombie_even_with_a_live_launcher_owner():
+    # The other half of spec 4.5's asymmetric trust that Finding 4 flagged as
+    # untested: test_a_system_profiler_named_display_is_never_signalled_...
+    # above covers the owner-with-a-non-launcher-ppid (orphan_a) shape, but
+    # nothing exercised the owner-with-a-live-launcher-ppid (active) shape --
+    # the report_only branch in classify() precedes BOTH the orphan_a and the
+    # active check, so this is the other outcome it must be pinned ahead of.
+    # Without that branch placement this exact shape would classify `active`
+    # and never be reaped at all, on the strength of a guessed name.
+    processes = {
+        4903: ProcessRecord(pid=4903, ppid=4821, command=HELPER_CMD),
+        4821: ProcessRecord(pid=4821, ppid=4800, command=LAUNCHER_CMD),
+    }
+    guessed = _display(
+        serial=4903, name=OURS, in_nsscreen=False, name_source=NAME_SOURCE_SYSTEM_PROFILER
+    )
+
+    results = classify([guessed], processes, OURS)
+
+    assert [c.verdict for c in results] == [VERDICT_ZOMBIE_B]
+    assert results[0].owner_pid is None
+
+    world = _FakeWorld(present={69732865})
+
+    assert _run(world, results) == []
+    assert world.signals == [], "no signal may be sent on the strength of a guessed name"
+
+
 def test_reap_tolerates_an_owner_that_already_exited():
     world = _FakeWorld(present={69732865})
 
@@ -676,6 +704,26 @@ def test_scan_exits_dirty_for_a_zombie_named_only_by_system_profiler(monkeypatch
     assert exit_code == EXIT_DIRTY
     assert "FAIL" in out
     assert "1 zombie (unreclaimable)" in out
+
+
+def test_scan_prints_a_zombies_detail_so_an_operator_can_see_its_provenance(monkeypatch, capsys):
+    # Finding: §4.5/§7 promise that a zombie_b's detail distinguishes a
+    # serial-attributed claim from a merely-guessed system_profiler name so an
+    # operator deciding whether to wait or reboot can see which one they have
+    # -- but _scan used to print `detail` only for foreign_virtual rows.
+    # classify() carrying the string is not enough; it must reach stdout via
+    # the real CLI entry point a human actually runs.
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(serial=4110)],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+    exit_code = main(["scan", "--name", OURS])
+    out = capsys.readouterr().out
+
+    assert exit_code == EXIT_DIRTY
+    assert "owner pid 4110 is not a live vdisplay_helper" in out
 
 
 def test_reap_exits_dirty_when_a_zombie_is_present(monkeypatch):
