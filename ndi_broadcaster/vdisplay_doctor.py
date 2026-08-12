@@ -47,8 +47,11 @@ ACTIONABLE_VERDICTS = frozenset({VERDICT_ORPHAN_A, VERDICT_ZOMBIE_B})
 class DisplayRecord:
     """One entry from CGGetOnlineDisplayList, plus the AppKit-side name.
 
-    `name` is None when NSScreen did not list this display, which is itself
-    diagnostic: an online display AppKit cannot see is the zombie signature.
+    `name` is None when NSScreen did not list this display AND no name could
+    be recovered via the system_profiler fallback (see display_inventory.py);
+    it can therefore be populated even when `in_nsscreen` is False.
+    `in_nsscreen`, not `name`, is the authoritative signal for whether AppKit
+    could see the display -- the zombie signature is `in_nsscreen is False`.
     """
 
     display_id: int

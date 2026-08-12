@@ -34,3 +34,23 @@ def test_online_display_ids_agrees_with_collect_displays():
     from ndi_broadcaster.display_inventory import collect_displays, online_display_ids
 
     assert online_display_ids() == {d.display_id for d in collect_displays()}
+
+
+def test_recover_names_via_system_profiler_names_real_displays():
+    # Calls the fallback directly, bypassing collect_displays' gate (which
+    # never fires on this healthy hardware), to exercise its subprocess/JSON
+    # parsing -- SPDisplaysDataType -> spdisplays_ndrvs -> _name -- against
+    # this machine's 3 real displays. No zombie needed for that; a wrong JSON
+    # key path would otherwise go completely untested until a real zombie
+    # needed it in the field.
+    from ndi_broadcaster.display_inventory import (
+        online_display_ids,
+        recover_names_via_system_profiler,
+    )
+
+    ids = online_display_ids()
+    names = recover_names_via_system_profiler(list(ids))
+
+    assert names, "system_profiler produced no names for any real display"
+    assert set(names) <= ids
+    assert all(isinstance(name, str) and name for name in names.values())

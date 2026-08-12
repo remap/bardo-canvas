@@ -47,14 +47,21 @@ def online_display_ids() -> set[int]:
     return set(_online_ids())
 
 
-def recover_names_via_system_profiler() -> dict[int, str]:
+def recover_names_via_system_profiler(display_ids: list[int]) -> dict[int, str]:
     """Best-effort display names for displays NSScreen cannot see.
 
     Only worth its ~1-3s cost in the one case that needs it (see
     collect_displays). system_profiler does not report CGDirectDisplayIDs, so
-    names are matched positionally against the online list -- best-effort by
+    names are matched positionally against `display_ids` -- best-effort by
     construction, and used only to label a display that would otherwise be
     reported unnamed.
+
+    Takes the caller's already-collected ID list rather than re-querying
+    Quartz: this function reads no display state itself, so it has no
+    run-loop-spin precondition, and it can't pair names against a different
+    online-list snapshot than the one the caller is building records from
+    (system_profiler's subprocess takes 1-3s, during which a second query
+    could disagree with the first).
     """
     try:
         completed = subprocess.run(
@@ -74,7 +81,7 @@ def recover_names_via_system_profiler() -> dict[int, str]:
             name = entry.get("_name")
             if name:
                 names.append(name)
-    return dict(zip(_online_ids(), names, strict=False))
+    return dict(zip(display_ids, names, strict=False))
 
 
 def collect_displays() -> list[DisplayRecord]:
@@ -93,7 +100,7 @@ def collect_displays() -> list[DisplayRecord]:
     # then pay for system_profiler; a healthy machine never does.
     fallback_names: dict[int, str] = {}
     if len(ids) > len(nsscreen_names):
-        fallback_names = recover_names_via_system_profiler()
+        fallback_names = recover_names_via_system_profiler(ids)
 
     records: list[DisplayRecord] = []
     for display_id in ids:
