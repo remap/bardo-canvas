@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from ndi_broadcaster.vdisplay_doctor import (
@@ -363,3 +365,65 @@ def test_reap_tolerates_an_owner_that_already_exited():
     [result] = _run(world, [_orphan()])
 
     assert result.outcome == UNRECLAIMABLE
+
+
+from ndi_broadcaster.vdisplay_doctor import probe
+
+
+def test_probe_kills_the_helper_when_a_phase_fails_so_no_probe_display_leaks(monkeypatch):
+    # The failure path is the one that matters: a probe that dies in `settle`
+    # and leaves its helper running has leaked exactly the kind of display this
+    # whole tool exists to detect. Fakes stand in for the real startup path, so
+    # this runs with no display server.
+    import ndi_broadcaster.virtual_display as vd
+    from ndi_broadcaster.virtual_display import DisplayInfo
+
+    class _FakeProc:
+        def __init__(self):
+            self.killed = False
+            self.terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    fake_proc = _FakeProc()
+    monkeypatch.setattr(vd, "ensure_helper_built", lambda helper_dir: Path("/fake/helper"))
+    monkeypatch.setattr(
+        vd,
+        "start_vdisplay_helper",
+        lambda *a, **k: (fake_proc, DisplayInfo(display_id=999, x=0, y=0, width=1920, height=1080)),
+    )
+
+    def boom(*_args, **_kwargs):
+        raise TimeoutError("display 999 did not settle")
+
+    monkeypatch.setattr(vd, "wait_for_settled_bounds", boom)
+
+    result = probe(1920, 1080, helper_dir=Path("/fake"))
+
+    assert not result.ok
+    assert result.failure_phase == "settle"
+    assert fake_proc.killed, "a failed probe must not leave its helper running"
+
+
+def test_probe_reports_the_phase_that_failed_when_the_helper_never_starts(monkeypatch):
+    import ndi_broadcaster.virtual_display as vd
+
+    monkeypatch.setattr(vd, "ensure_helper_built", lambda helper_dir: Path("/fake/helper"))
+
+    def never_starts(*_args, **_kwargs):
+        raise TimeoutError("vdisplay_helper did not report its startup status within 15.0s")
+
+    monkeypatch.setattr(vd, "start_vdisplay_helper", never_starts)
+
+    result = probe(1920, 1080, helper_dir=Path("/fake"))
+
+    assert not result.ok
+    assert result.failure_phase == "create"
+    assert "did not report" in result.message

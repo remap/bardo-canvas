@@ -18,6 +18,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 # macOS synthesizes its own 640x480 ghost display, confirmed by Apple DTS in
 # developer.apple.com/forums/thread/787154. The numbers are legacy Classic-era
@@ -321,3 +322,106 @@ def reap_orphans(
         )
 
     return results
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    ok: bool
+    timings: dict[str, float]
+    failure_phase: str | None
+    message: str
+
+
+def probe(
+    width: int,
+    height: int,
+    *,
+    helper_dir: Path,
+    teardown_timeout_s: float = 5.0,
+    poll_interval_s: float = 0.25,
+) -> ProbeResult:
+    """Create, settle, and tear down one throwaway virtual display.
+
+    Answers the question that actually protects a run -- can this machine still
+    configure a virtual display? -- rather than the weaker "does the display
+    list look clean", since a dirty list may be unfixable (there is no
+    remove-by-ID call anywhere in the private CGVirtualDisplay API).
+
+    Calls the production startup path unmodified, so it doubles as a regression
+    test for main.swift's shutdownAndExit() ARC teardown. Every wait is
+    bounded: 15s and 20s come from start_vdisplay_helper and
+    wait_for_settled_bounds, plus teardown_timeout_s here. Per-phase timings
+    are reported individually so a *slowing*
+    CGCompleteDisplayConfiguration is visible before it becomes a hanging one.
+    """
+    # Imported inside the function, so monkeypatching these module attributes in
+    # tests takes effect (the import re-reads them on every call) and so a
+    # PyObjC-free environment can still import this module. online_display_ids
+    # is imported later still, just before the teardown poll, so a failure in
+    # build/create/settle never needs PyObjC at all.
+    from .virtual_display import (
+        ensure_helper_built,
+        start_vdisplay_helper,
+        wait_for_settled_bounds,
+    )
+
+    timings: dict[str, float] = {}
+    proc = None
+    display_id: int | None = None
+
+    def _fail(phase: str, message: str) -> ProbeResult:
+        return ProbeResult(ok=False, timings=timings, failure_phase=phase, message=message)
+
+    try:
+        started = time.monotonic()
+        try:
+            binary_path = ensure_helper_built(helper_dir)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _fail("build", f"could not build vdisplay_helper: {exc}")
+        timings["build"] = time.monotonic() - started
+
+        started = time.monotonic()
+        try:
+            proc, info = start_vdisplay_helper(binary_path, width, height, PROBE_DISPLAY_NAME)
+        except (TimeoutError, RuntimeError, ValueError) as exc:
+            return _fail("create", str(exc))
+        display_id = info.display_id
+        timings["create"] = time.monotonic() - started
+
+        started = time.monotonic()
+        try:
+            wait_for_settled_bounds(display_id, width, height)
+        except TimeoutError as exc:
+            return _fail("settle", str(exc))
+        timings["settle"] = time.monotonic() - started
+
+        from .display_inventory import online_display_ids
+
+        started = time.monotonic()
+        proc.terminate()
+        try:
+            proc.wait(timeout=teardown_timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        deadline = time.monotonic() + teardown_timeout_s
+        while time.monotonic() < deadline:
+            if display_id not in online_display_ids():
+                timings["teardown"] = time.monotonic() - started
+                proc = None
+                return ProbeResult(
+                    ok=True,
+                    timings=timings,
+                    failure_phase=None,
+                    message="create/settle/teardown all succeeded",
+                )
+            time.sleep(poll_interval_s)
+        timings["teardown"] = time.monotonic() - started
+        return _fail(
+            "teardown",
+            f"display {display_id} still online {teardown_timeout_s}s after the helper "
+            "was terminated -- shutdownAndExit()'s ARC release may have regressed",
+        )
+    finally:
+        # Never leave a probe display behind, whichever phase failed.
+        if proc is not None:
+            proc.kill()
