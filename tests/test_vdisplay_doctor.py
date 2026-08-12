@@ -427,3 +427,44 @@ def test_probe_reports_the_phase_that_failed_when_the_helper_never_starts(monkey
     assert not result.ok
     assert result.failure_phase == "create"
     assert "did not report" in result.message
+
+
+def test_probe_returns_a_failure_result_instead_of_raising_when_the_teardown_poll_errors(
+    monkeypatch,
+):
+    # Task 6's CLI depends on probe() always returning a ProbeResult rather
+    # than raising -- a transient Quartz/CoreGraphics error while polling for
+    # teardown must not become an unhandled traceback.
+    import ndi_broadcaster.display_inventory as di
+    import ndi_broadcaster.virtual_display as vd
+    from ndi_broadcaster.virtual_display import DisplayInfo
+
+    class _FakeProc:
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    fake_proc = _FakeProc()
+    monkeypatch.setattr(vd, "ensure_helper_built", lambda helper_dir: Path("/fake/helper"))
+    monkeypatch.setattr(
+        vd,
+        "start_vdisplay_helper",
+        lambda *a, **k: (fake_proc, DisplayInfo(display_id=999, x=0, y=0, width=1920, height=1080)),
+    )
+    monkeypatch.setattr(vd, "wait_for_settled_bounds", lambda *a, **k: None)
+
+    def boom():
+        raise RuntimeError("CoreGraphics call failed")
+
+    monkeypatch.setattr(di, "online_display_ids", boom)
+
+    result = probe(1920, 1080, helper_dir=Path("/fake"))
+
+    assert not result.ok
+    assert result.failure_phase == "teardown"
+    assert "CoreGraphics call failed" in result.message

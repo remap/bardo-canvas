@@ -383,7 +383,7 @@ def probe(
         started = time.monotonic()
         try:
             proc, info = start_vdisplay_helper(binary_path, width, height, PROBE_DISPLAY_NAME)
-        except (TimeoutError, RuntimeError, ValueError) as exc:
+        except (TimeoutError, RuntimeError, ValueError, KeyError, OSError) as exc:
             return _fail("create", str(exc))
         display_id = info.display_id
         timings["create"] = time.monotonic() - started
@@ -404,17 +404,25 @@ def probe(
         except subprocess.TimeoutExpired:
             proc.kill()
         deadline = time.monotonic() + teardown_timeout_s
-        while time.monotonic() < deadline:
-            if display_id not in online_display_ids():
-                timings["teardown"] = time.monotonic() - started
-                proc = None
-                return ProbeResult(
-                    ok=True,
-                    timings=timings,
-                    failure_phase=None,
-                    message="create/settle/teardown all succeeded",
-                )
-            time.sleep(poll_interval_s)
+        try:
+            while time.monotonic() < deadline:
+                if display_id not in online_display_ids():
+                    timings["teardown"] = time.monotonic() - started
+                    proc = None
+                    return ProbeResult(
+                        ok=True,
+                        timings=timings,
+                        failure_phase=None,
+                        message="create/settle/teardown all succeeded",
+                    )
+                time.sleep(poll_interval_s)
+        except Exception as exc:  # noqa: BLE001 -- deliberately blind: online_display_ids()
+            # calls into a private, undocumented CoreGraphics/Quartz API, so its
+            # failure mode has no narrower type to name here. A transient error
+            # must still come back as a ProbeResult, not an unhandled traceback --
+            # Task 6's CLI depends on probe() always returning rather than raising.
+            timings["teardown"] = time.monotonic() - started
+            return _fail("teardown", f"error while polling for display teardown: {exc}")
         timings["teardown"] = time.monotonic() - started
         return _fail(
             "teardown",

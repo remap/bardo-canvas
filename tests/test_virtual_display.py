@@ -134,14 +134,70 @@ def test_start_vdisplay_helper_raises_when_no_output(monkeypatch):
         def read(self):
             return "swiftc binary crashed"
 
+    killed = threading.Event()
+
     class _FakeProc:
         stdout = _FakeStdout()
         stderr = _FakeStderr()
+
+        def kill(self):
+            killed.set()
 
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
 
     with pytest.raises(RuntimeError, match="swiftc binary crashed"):
         start_vdisplay_helper(Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display")
+
+    assert killed.is_set(), "an empty-stdout failure must not leave the helper running"
+
+
+def test_start_vdisplay_helper_kills_the_process_on_malformed_json(monkeypatch):
+    # Valid line, but not JSON -- json.loads must not be allowed to leak the
+    # helper it was given no chance to report a usable displayID for.
+    class _FakeStdout:
+        def readline(self):
+            return "not json\n"
+
+    killed = threading.Event()
+
+    class _FakeProc:
+        stdout = _FakeStdout()
+
+        def kill(self):
+            killed.set()
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
+
+    with pytest.raises(json.JSONDecodeError):
+        start_vdisplay_helper(Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display")
+
+    assert killed.is_set(), "malformed JSON must not leave the helper running"
+
+
+def test_start_vdisplay_helper_kills_the_process_when_json_is_missing_a_key(monkeypatch):
+    # Valid JSON, but main.swift's contract (displayID/x/y/width/height) is
+    # violated -- the KeyError below must still kill the process it was given
+    # no way to hand back to the caller.
+    payload = json.dumps({"x": 0, "y": 0, "width": 3840, "height": 2160})
+
+    class _FakeStdout:
+        def readline(self):
+            return payload + "\n"
+
+    killed = threading.Event()
+
+    class _FakeProc:
+        stdout = _FakeStdout()
+
+        def kill(self):
+            killed.set()
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
+
+    with pytest.raises(KeyError):
+        start_vdisplay_helper(Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display")
+
+    assert killed.is_set(), "a missing JSON key must not leave the helper running"
 
 
 def test_start_vdisplay_helper_raises_on_timeout_and_kills_the_process(monkeypatch):
@@ -164,6 +220,8 @@ def test_start_vdisplay_helper_raises_on_timeout_and_kills_the_process(monkeypat
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
 
     with pytest.raises(TimeoutError, match="did not report"):
-        start_vdisplay_helper(Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display", timeout_s=0.2)
+        start_vdisplay_helper(
+            Path("/fake/vdisplay_helper"), 3840, 2160, "Test Display", timeout_s=0.2
+        )
 
     assert killed.is_set()

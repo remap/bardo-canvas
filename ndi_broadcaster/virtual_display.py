@@ -82,17 +82,25 @@ def start_vdisplay_helper(
         raise TimeoutError(
             f"vdisplay_helper did not report its startup status within {timeout_s}s"
         ) from None
-    if not line:
-        err = proc.stderr.read()
-        raise RuntimeError(f"vdisplay_helper produced no stdout; stderr:\n{err}")
-    payload = json.loads(line)
-    info = DisplayInfo(
-        display_id=payload["displayID"],
-        x=payload["x"],
-        y=payload["y"],
-        width=payload["width"],
-        height=payload["height"],
-    )
+    try:
+        if not line:
+            err = proc.stderr.read()
+            raise RuntimeError(f"vdisplay_helper produced no stdout; stderr:\n{err}")
+        payload = json.loads(line)
+        info = DisplayInfo(
+            display_id=payload["displayID"],
+            x=payload["x"],
+            y=payload["y"],
+            width=payload["width"],
+            height=payload["height"],
+        )
+    except BaseException:
+        # Every path out of here leaves `proc` alive but unreturned, so no
+        # caller-side finally can reach it -- launcher.py's own cleanup is
+        # keyed on the tuple assignment that never happened. Killing here is
+        # the only place the leak can be closed.
+        proc.kill()
+        raise
     return proc, info
 
 
