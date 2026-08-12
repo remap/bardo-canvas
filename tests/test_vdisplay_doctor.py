@@ -473,6 +473,7 @@ def test_probe_returns_a_failure_result_instead_of_raising_when_the_teardown_pol
 from ndi_broadcaster.vdisplay_doctor import (
     EXIT_CLEAN,
     EXIT_DIRTY,
+    EXIT_ERROR,
     EXIT_PROBE_FAILED,
     ProbeResult,
     broadcaster_yaml_path,
@@ -530,7 +531,11 @@ def test_scan_exits_dirty_when_a_zombie_is_present(monkeypatch):
     assert main(["scan", "--name", OURS]) == EXIT_DIRTY
 
 
-def test_reap_exits_dirty_when_an_unreclaimable_zombie_remains(monkeypatch):
+def test_reap_exits_dirty_when_a_zombie_is_present(monkeypatch):
+    # A zombie has no owner to signal, so this exercises the classifications
+    # half of main()'s `remaining` union (zombie_b), not reap_orphans's own
+    # outcome -- see test_reap_exits_dirty_when_an_orphan_cannot_be_reclaimed
+    # for the other half.
     monkeypatch.setattr(
         "ndi_broadcaster.vdisplay_doctor._collect_displays",
         lambda: [_display(serial=4110)],
@@ -539,6 +544,50 @@ def test_reap_exits_dirty_when_an_unreclaimable_zombie_remains(monkeypatch):
     monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._online_display_ids", lambda: {69732865})
 
     assert main(["reap", "--name", OURS]) == EXIT_DIRTY
+
+
+def test_reap_exits_dirty_when_an_orphan_cannot_be_reclaimed(monkeypatch, capsys):
+    # Unlike the zombie test above, this display classifies as orphan_a, so
+    # reap_orphans's real SIGTERM/SIGKILL escalation runs. The owner never
+    # complies (list_display_ids never drops the id), so the outcome must be
+    # UNRECLAIMABLE and main() must report EXIT_DIRTY from the *results* half
+    # of its `remaining` union -- the half the old zombie-only test never
+    # touched. Wraps the real reap_orphans with tighter timeouts so the test
+    # stays fast without stubbing away the logic under test; signal_process is
+    # stubbed only so no real OS signal is sent to a possibly-reused pid.
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(serial=4903)],
+    )
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor.read_process_table",
+        lambda: {4903: ProcessRecord(pid=4903, ppid=1, command=HELPER_CMD)},
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.signal_process", lambda pid, sig: None)
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor._online_display_ids", lambda: {69732865})
+
+    real_reap_orphans = reap_orphans
+
+    def fast_reap_orphans(classifications, *, signal_process, list_display_ids):
+        return real_reap_orphans(
+            classifications,
+            signal_process=signal_process,
+            list_display_ids=list_display_ids,
+            verify_timeout_s=0.05,
+            poll_interval_s=0.01,
+            sleep=lambda _seconds: None,
+        )
+
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.reap_orphans", fast_reap_orphans)
+
+    exit_code = main(["reap", "--name", OURS])
+    out = capsys.readouterr().out
+
+    assert exit_code == EXIT_DIRTY
+    # The outcome itself must be reflected, not just the exit code, so this
+    # cannot pass if reap_orphans is ever bypassed or its result ignored.
+    assert UNRECLAIMABLE in out
+    assert "69732865" in out
 
 
 def test_probe_refuses_to_run_on_a_dirty_machine(monkeypatch):
@@ -584,3 +633,46 @@ def test_probe_exit_code_distinguishes_broken_from_dirty(monkeypatch):
     )
 
     assert main(["probe", "--name", OURS]) == EXIT_CLEAN
+
+
+def _healthy_machine(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ndi_broadcaster.vdisplay_doctor._collect_displays",
+        lambda: [_display(display_id=1, is_builtin=True, name="Built-in Retina Display")],
+    )
+    monkeypatch.setattr("ndi_broadcaster.vdisplay_doctor.read_process_table", dict)
+
+
+def test_probe_exits_with_an_internal_error_when_broadcaster_yaml_is_missing(monkeypatch, tmp_path):
+    # probe needs config.width/config.height even though --name bypassed
+    # config-driven name resolution. Before the fix this load happened
+    # unguarded, so a missing file raised uncaught and Python's default exit
+    # code (1) was indistinguishable from EXIT_DIRTY.
+    _healthy_machine(monkeypatch)
+    monkeypatch.setenv("BROADCASTER_YAML", str(tmp_path / "does-not-exist.yaml"))
+
+    assert main(["probe", "--name", OURS]) == EXIT_ERROR
+
+
+def test_probe_exits_with_an_internal_error_when_broadcaster_yaml_is_malformed(
+    monkeypatch, tmp_path
+):
+    # yaml.YAMLError is not a ValueError subclass, so a bare
+    # `except (OSError, ValueError)` guard lets a syntax error in the YAML
+    # escape uncaught -- also colliding with EXIT_DIRTY's exit code.
+    _healthy_machine(monkeypatch)
+    bad_yaml = tmp_path / "broken.yaml"
+    bad_yaml.write_text("key: [unterminated\n")
+    monkeypatch.setenv("BROADCASTER_YAML", str(bad_yaml))
+
+    assert main(["probe", "--name", OURS]) == EXIT_ERROR
+
+
+def test_scan_with_name_succeeds_even_when_broadcaster_yaml_is_missing(monkeypatch, tmp_path):
+    # Pins the property that must not regress: --name alone is enough for
+    # scan/reap to run with no config file present at all, because the config
+    # load is only fatal when the value it would supply is actually needed.
+    _healthy_machine(monkeypatch)
+    monkeypatch.setenv("BROADCASTER_YAML", str(tmp_path / "does-not-exist.yaml"))
+
+    assert main(["scan", "--name", OURS]) == EXIT_CLEAN

@@ -21,7 +21,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import load_broadcaster_config
+import yaml
+
+from .config import BroadcasterConfig, load_broadcaster_config
 
 # macOS synthesizes its own 640x480 ghost display, confirmed by Apple DTS in
 # developer.apple.com/forums/thread/787154. The numbers are legacy Classic-era
@@ -472,11 +474,21 @@ def broadcaster_yaml_path(env: dict[str, str]) -> Path:
     return Path(env.get("BROADCASTER_YAML", str(REPO_ROOT / "config" / "broadcaster.yaml")))
 
 
-def _resolve_display_name(explicit: str | None) -> str:
-    """--name wins, so scan/reap work with no config file present at all."""
+def _resolve_display_name(explicit: str | None, config: BroadcasterConfig | None) -> str:
+    """--name wins, so scan/reap work with no config file present at all.
+
+    Takes an already-loaded config (or None) rather than loading its own, so
+    main() can guard the config load exactly once and report a single,
+    correct exit code no matter which command needed it. A failed load is
+    only fatal here when the name is actually needed and unavailable --
+    --name alone must still be enough to run scan/reap with no config file
+    present at all.
+    """
     if explicit is not None:
         return explicit
-    return load_broadcaster_config(broadcaster_yaml_path(dict(os.environ))).sck_virtual_display_name
+    if config is None:
+        raise ValueError("no --name given and broadcaster.yaml could not be loaded")
+    return config.sck_virtual_display_name
 
 
 # Indirected through module-level functions so tests can monkeypatch them
@@ -553,10 +565,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Loaded exactly once, up front, and guarded here -- not at each of the two
+    # places (name resolution, probe's width/height) that would otherwise load
+    # it separately. That closes the exit-code collision an unguarded second
+    # load caused: any of OSError (missing file), yaml.YAMLError (malformed
+    # YAML), or pydantic's ValidationError (a ValueError subclass) must become
+    # EXIT_ERROR, never an uncaught traceback that exits 1 and is
+    # indistinguishable from EXIT_DIRTY.
+    config: BroadcasterConfig | None = None
+    config_error: Exception | None = None
     try:
-        display_name = _resolve_display_name(args.name)
-    except (OSError, ValueError) as exc:
-        print(f"ERROR  could not resolve the virtual display name: {exc}")
+        config = load_broadcaster_config(broadcaster_yaml_path(dict(os.environ)))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        config_error = exc
+
+    try:
+        display_name = _resolve_display_name(args.name, config)
+    except ValueError:
+        print(f"ERROR  could not resolve the virtual display name: {config_error}")
         return EXIT_ERROR
 
     classifications, scan_code = _scan(display_name)
@@ -591,7 +617,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_DIRTY
 
-    config = load_broadcaster_config(broadcaster_yaml_path(dict(os.environ)))
+    if config is None:
+        print(
+            "ERROR  could not load broadcaster.yaml (needed for probe's width/height): "
+            f"{config_error}"
+        )
+        return EXIT_ERROR
+
     result = probe(
         config.width,
         config.height,
