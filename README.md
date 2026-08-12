@@ -167,6 +167,26 @@ See `docs/bugs.md` for open issues, including a shutdown hang that can leave
 the broadcaster process (and its Chrome/`vdisplay_helper` children) alive
 indefinitely after a stop.
 
+### Checking for zombie virtual displays
+
+The `sck`/`virtual` backend creates a virtual display via a private macOS API
+that has no remove-by-ID call — a display can only be torn down by the process
+that created it. If that process is killed uncleanly the display can outlive
+it, and enough accumulated zombies make every subsequent virtual display hang
+at creation.
+
+```bash
+python -m ndi_broadcaster.vdisplay_doctor scan    # read-only, ~0.5s, safe any time
+python -m ndi_broadcaster.vdisplay_doctor reap    # SIGTERM orphaned helpers, verify
+python -m ndi_broadcaster.vdisplay_doctor probe   # ~5-8s create/teardown health gate
+```
+
+Exit codes: `0` clean, `1` orphan or zombie present, `2` probe failed, `3` error.
+
+Run `probe` before a long broadcast to confirm the machine is fit, and `reap`
+after an unclean stop. `reap` never touches a display that is serving a live
+broadcast, so it is safe to run at any time.
+
 Additional `broadcaster.yaml` fields this backend uses:
 
 - `sck_display_mode` — `"virtual"` or `"physical"`, **required** when

@@ -96,12 +96,15 @@ it's likely equally exposed.
   been separately live-tested for this specific failure mode.
 
 **Current operational workaround:** if a stop hangs, `SIGKILL` the launcher
-process, then separately `SIGTERM` any orphaned `vdisplay_helper` (its own
-graceful-shutdown path is confirmed reliable in isolation — see the
-`sck-capture-backend-design.md` §10 zombie-display writeup) to avoid
-leaking its virtual display, then confirm via
-`NSApplication.sharedApplication()` + a brief `CFRunLoopRunInMode` spin
-+ `NSScreen.screens()` that no zombie remains before restarting.
+process, then run `python -m ndi_broadcaster.vdisplay_doctor reap` — it finds
+the orphaned `vdisplay_helper` (attributed via the creator PID `main.swift`
+stores in `descriptor.serialNum`), `SIGTERM`s it, and verifies the display
+actually left WindowServer rather than just that the process exited. Order
+matters: reap *after* killing the launcher, because while the launcher is still
+alive its helper is correctly classified `active` and left alone. Before
+restarting, `python -m ndi_broadcaster.vdisplay_doctor probe` confirms the
+machine can still create and tear down a virtual display. See
+`docs/superpowers/specs/2026-08-11-vdisplay-doctor-design.md`.
 
 **Where the code lives:** `ndi_broadcaster/launcher.py`,
 `_shutdown_with_timeout()`, and its two call sites in `_capture_loop_sck`
@@ -120,3 +123,10 @@ and `_capture_loop`.
   *exit* at all.
 - **`enableImageMode()` positioning bug / duplicate draw paths** — see
   `docs/superpowers/specs/2026-08-08-layout-driver-framework-design.md` §10.
+- **`start_vdisplay_helper` leaking a live virtual display on malformed or
+  incomplete startup JSON** — see
+  `docs/superpowers/specs/2026-08-10-sck-capture-backend-design.md` §10 (the
+  third entry). Found and fixed (`b1c5971`) while building
+  `vdisplay_doctor`'s `probe` subcommand; distinct from the two `main.swift`
+  bugs earlier in that same section — this one was in the Python-side
+  `ndi_broadcaster/virtual_display.py`.

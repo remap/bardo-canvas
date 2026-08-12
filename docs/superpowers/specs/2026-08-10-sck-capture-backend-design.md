@@ -375,6 +375,30 @@ cheap insurance; a bare `NSApplication.sharedApplication()` call is not
 sufficient by itself to get a trustworthy one-shot display-list read, spin
 the run loop briefly too.
 
+**A third leak, found later while building the doctor CLI.** Building
+`ndi_broadcaster/vdisplay_doctor.py`'s `probe` subcommand (see
+`docs/superpowers/specs/2026-08-11-vdisplay-doctor-design.md`) turned up a
+third real leak — this time on the Python side, in
+`ndi_broadcaster/virtual_display.py`'s `start_vdisplay_helper`, not in
+`main.swift`. That function had exactly one cleanup path: the `queue.Empty`
+timeout, which kills `proc` before raising `TimeoutError`. Three other exits
+did not: the `RuntimeError` for empty stdout, `json.loads` raising
+`JSONDecodeError` on malformed output, and `payload["displayID"]` raising
+`KeyError` on a payload missing a required field all raised without killing
+`proc` first. Because `proc` is a local variable never returned on those
+paths, the caller's own `vdisplay_proc` stays `None`, so no caller-side
+`finally` — including `launcher.py`'s own, at `_capture_loop_sck`'s outer
+`finally` (`if vdisplay_proc is not None: vdisplay_proc.terminate()`) — can
+reach the still-running helper. A live `vdisplay_helper` holding a real
+virtual display was therefore orphaned whenever the helper started but
+reported malformed or incomplete startup JSON: a production zombie-display
+leak on exactly the failure paths this tool exists to detect, caused by its
+own dependency. Fixed in `b1c5971`: the parse/validate block is now wrapped
+in `try`/`except BaseException`, so every post-`Popen` failure kills the
+process before propagating — `BaseException` rather than `Exception` so a
+`KeyboardInterrupt` or signal-driven exception mid-parse can't leak the
+display either.
+
 **Unresolved.** Once multiple zombies had accumulated (worst case
 observed: 4), no code-level or terminal-only remedy was found to force
 their removal — there is no "remove by display ID" call anywhere in the
