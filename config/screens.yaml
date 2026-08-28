@@ -4,7 +4,9 @@ canvas:
   fps: 30
 
 module_size: 200
-layout_offset: {x: 220, y: 80}
+#layout_offset: {x: 220, y: 80}
+
+layout_offset: {x: 0, y: 0}
 
 screens:
   - id: F

@@ -13,12 +13,14 @@ import pytest
 
 from ndi_broadcaster.config import BroadcasterConfig
 from ndi_broadcaster.launcher import (
-    _CHROME_TOOLBAR_HEIGHT_PX,
+    _CHROME_APP_MODE_HEADROOM_PX,
     REPO_ROOT,
     HealthCheckTimeoutError,
     _chrome_launch_args,
     _decode_raw_rgba_frame,
     _LatestFrameSlot,
+    _measure_chrome_overhead_px,
+    _measure_sck_crop_top,
     _raise_keyboard_interrupt,
     _sck_chrome_window_size,
     _sender_thread_loop,
@@ -202,18 +204,55 @@ def test_validate_sck_display_mode_physical_requires_name():
         )
 
 
-def test_sck_chrome_window_height_matches_toolbar_crop():
-    # The load-bearing invariant: Chrome's window must be exactly
-    # _CHROME_TOOLBAR_HEIGHT_PX taller than config.height, since SckCapture
-    # is constructed with crop_top=_CHROME_TOOLBAR_HEIGHT_PX and crops
-    # exactly that many rows off the top of every captured frame. Drift
-    # between the two leaves a toolbar sliver or a black bar on the wall.
+def test_sck_chrome_window_height_leaves_headroom_above_config_height():
+    # This is headroom, not an exact crop target (see _CHROME_APP_MODE_HEADROOM_PX's
+    # comment: the real title-bar height was found to jitter run over run, so
+    # crop_top is measured live by _measure_chrome_overhead_px instead of assumed
+    # from this constant). All this asserts is the window is requested taller by
+    # exactly that headroom, which is what keeps it from being clipped by a virtual
+    # display sized to config.height + _CHROME_APP_MODE_HEADROOM_PX.
     config = BroadcasterConfig(width=3840, height=2160)
 
     width, height = _sck_chrome_window_size(config)
 
     assert width == config.width
-    assert height == config.height + _CHROME_TOOLBAR_HEIGHT_PX
+    assert height == config.height + _CHROME_APP_MODE_HEADROOM_PX
+
+
+def test_measure_chrome_overhead_px_computes_gap_from_given_window_height():
+    config = BroadcasterConfig(width=3840, height=2160)
+
+    class _FakePage:
+        async def evaluate(self, _script):
+            return [config.width, 2190]
+
+    overhead = asyncio.run(_measure_chrome_overhead_px(_FakePage(), config, window_height=2220))
+
+    assert overhead == 30
+
+
+def test_measure_chrome_overhead_px_raises_on_unexpected_inner_width():
+    config = BroadcasterConfig(width=3840, height=2160)
+
+    class _FakePage:
+        async def evaluate(self, _script):
+            return [config.width - 5, 2160]
+
+    with pytest.raises(RuntimeError, match="innerWidth"):
+        asyncio.run(_measure_chrome_overhead_px(_FakePage(), config, window_height=2220))
+
+
+def test_measure_sck_crop_top_measures_against_the_headroom_window_size():
+    config = BroadcasterConfig(width=3840, height=2160)
+    _, headroom_height = _sck_chrome_window_size(config)
+
+    class _FakePage:
+        async def evaluate(self, _script):
+            return [config.width, headroom_height - 28]
+
+    crop_top = asyncio.run(_measure_sck_crop_top(_FakePage(), config))
+
+    assert crop_top == 28
 
 
 def test_run_requires_sck_display_mode_when_backend_is_sck(tmp_path, monkeypatch):

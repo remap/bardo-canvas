@@ -138,6 +138,44 @@ The `sck` capture backend below removes Playwright's driver from the sustained
 capture path entirely and does not have this problem; see framework spec §3.4a for
 the full investigation and citations.
 
+### ndi-grid-test (calibration / troubleshooting)
+
+A synthetic test pattern for verifying the wall is sliced and captured pixel-exactly
+end to end — not a content app. Renders one continuous grid of uniquely-numbered,
+borderless 200×200 squares (matching `screens.yaml`'s `module_size`) across the full
+canvas, sliced per screen the same way real content is; a 1px unaliased black
+crosshair (drawn via `fillRect`, not `ctx.stroke()`, which blurs) marks every
+module-grid intersection, including the ones sitting on a shared edge between two
+screens. Also draws a small diagnostic readout (`inner=WxH canvas=WxH scale=X.XXXX`)
+as a `position: fixed` element outside `#layout-driver-root`, so it reports the real
+browser window state rather than anything CSS-rescaled to fit — see
+`docs/sck-chrome-window-fit.md` for why that distinction matters.
+
+```bash
+APP_DIR=$(pwd)/apps/ndi-grid-test/static ./run.sh
+```
+
+How to read it:
+
+- **Numbers run continuously across a screen boundary** (e.g. `8`→`9` at the F/B
+  seam) with no gap, duplicate, or shift — confirms the compositor and slicing are
+  correct.
+- **Every crosshair is one crisp, unbroken pixel** wherever you capture it (a local
+  `/api/screenshot`, an NDI monitor, a downstream LED processor's per-screen crop) —
+  any blur, break, doubling, or offset is direct evidence of a real alignment issue
+  in that specific capture path, not an artifact of the test pattern.
+- **The diagnostic readout** only appears in a real OS-level window capture (e.g. the
+  `sck` broadcaster's NDI output), never in `/api/screenshot` (which composites
+  straight from the page's own canvases and never touches the real browser window).
+  If `scale` isn't `1.0000` or `inner` doesn't match `canvas`, the wall is being
+  resized inside the browser before capture ever sees it — see
+  `docs/sck-chrome-window-fit.md`.
+
+Compare a local `/api/screenshot` capture against the real broadcaster's NDI output
+at the same crosshair: if the former is pixel-perfect and the latter isn't, the bug
+is specifically in the capture backend (e.g. `sck`'s window/display handling), not
+the compositor.
+
 ### sck capture backend (macOS ScreenCaptureKit)
 
 The default capture backend (`config/broadcaster.yaml`'s `capture_backend: "sck"`,

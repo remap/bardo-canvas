@@ -35,6 +35,23 @@ def test_bgra_buffer_to_rgba_bytes_crops_rows_off_the_top():
     assert result == bytes([30, 20, 10, 255, 60, 50, 40, 255])
 
 
+def test_bgra_buffer_to_rgba_bytes_bounds_the_bottom_when_target_height_given():
+    # 1x4 image: crop_top=1 drops row0, target_height=2 additionally drops
+    # row3 -- the leftover headroom margin below the composited wall (see
+    # launcher.py's _CHROME_APP_MODE_HEADROOM_PX) -- keeping only row1/row2.
+    row0 = bytes([1, 2, 3, 255])  # dropped: above crop_top
+    row1 = bytes([10, 20, 30, 255])
+    row2 = bytes([40, 50, 60, 255])
+    row3 = bytes([70, 80, 90, 255])  # dropped: past crop_top + target_height
+    raw = row0 + row1 + row2 + row3
+
+    result = bgra_buffer_to_rgba_bytes(
+        raw, width=1, height=4, bytes_per_row=4, crop_top=1, target_height=2
+    )
+
+    assert result == bytes([30, 20, 10, 255, 60, 50, 40, 255])
+
+
 class _FakeWindow:
     def __init__(self, title):
         self._title = title
@@ -86,13 +103,13 @@ def test_wait_for_target_window_raises_after_timeout(monkeypatch):
         _wait_for_target_window("Layout Driver Broadcaster", timeout_s=0.05, poll_interval_s=0.01)
 
 
-def test_build_stream_config_requests_height_plus_crop_top():
-    # The other link in the Chrome-toolbar-crop chain (see
-    # launcher.py's _sck_chrome_window_size and _CHROME_TOOLBAR_HEIGHT_PX):
-    # the SCStream must be asked for exactly height + crop_top rows, since
-    # _StreamOutput crops crop_top rows back off every delivered frame. A
-    # real SCStreamConfiguration is safe to build here -- unlike start(),
-    # this needs no target window and no Screen Recording permission.
+def test_build_stream_config_defaults_native_capture_height_to_height_plus_crop_top():
+    # With no explicit native_capture_height (the old, no-headroom-margin
+    # assumption), the SCStream must be asked for exactly height + crop_top
+    # rows, since _StreamOutput crops crop_top rows back off every delivered
+    # frame with no bottom bound. A real SCStreamConfiguration is safe to
+    # build here -- unlike start(), this needs no target window and no
+    # Screen Recording permission.
     capture = SckCapture(
         "Layout Driver Broadcaster", width=3840, height=2160, fps=30, on_frame=lambda b: None, crop_top=87
     )
@@ -101,3 +118,26 @@ def test_build_stream_config_requests_height_plus_crop_top():
 
     assert config.width() == 3840
     assert config.height() == 2160 + 87
+
+
+def test_build_stream_config_uses_explicit_native_capture_height_when_given():
+    # launcher.py's sck path always passes this explicitly: the window is
+    # launched with headroom well beyond height + crop_top (see
+    # _CHROME_APP_MODE_HEADROOM_PX), and SCStreamConfiguration must request
+    # that real, full native height -- not height + crop_top -- or
+    # ScreenCaptureKit would have to resize what it captures to fit,
+    # reintroducing exactly the soft misalignment this scheme avoids.
+    capture = SckCapture(
+        "Layout Driver Broadcaster",
+        width=3840,
+        height=2160,
+        fps=30,
+        on_frame=lambda b: None,
+        crop_top=28,
+        native_capture_height=2220,
+    )
+
+    config = capture._build_stream_config()
+
+    assert config.width() == 3840
+    assert config.height() == 2220

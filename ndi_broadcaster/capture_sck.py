@@ -46,21 +46,36 @@ except ImportError as exc:  # pragma: no cover - exercised only off-macOS
 
 
 def bgra_buffer_to_rgba_bytes(
-    raw: bytes, width: int, height: int, bytes_per_row: int, crop_top: int = 0
+    raw: bytes,
+    width: int,
+    height: int,
+    bytes_per_row: int,
+    crop_top: int = 0,
+    target_height: int | None = None,
 ) -> bytes:
     """Convert a raw BGRA CVPixelBuffer read (with possible row padding) into
-    tightly packed RGBA bytes of exactly (height - crop_top, width, 4).
+    tightly packed RGBA bytes of exactly (target_height or height - crop_top, width, 4).
 
     Pure function, no PyObjC types -- testable with synthetic byte buffers.
     ScreenCaptureKit pixel buffers are frequently padded to a stride wider
     than width * 4 bytes; slicing by bytes_per_row before reshaping strips
     that padding rather than corrupting the image with it. crop_top drops
     that many rows off the top of the frame -- see launcher.py's
-    _CHROME_TOOLBAR_HEIGHT_PX for why this exists (trimming Chrome's own
-    tab-strip/address-bar out of the captured window).
+    _CHROME_APP_MODE_HEADROOM_PX and _shrink_sck_window_to_fit for why this
+    exists (trimming Chrome's own title bar out of the captured window).
+
+    target_height additionally bounds the bottom: the captured window can be
+    taller than crop_top + the wanted content height (launcher.py launches
+    it with deliberate headroom beyond Chrome's title bar, to guarantee it's
+    never clipped by its display regardless of that title bar's exact,
+    slightly-jittery height -- see _CHROME_APP_MODE_HEADROOM_PX), and without
+    this bound every delivered frame would carry that leftover margin as
+    extra rows. None keeps the old behavior of taking every row through the
+    end of the buffer, for callers with no such margin to drop.
     """
     arr = np.frombuffer(raw, dtype=np.uint8).reshape(height, bytes_per_row // 4, 4)
-    arr = arr[crop_top:, :width, [2, 1, 0, 3]]  # BGRA -> RGBA, drop the top crop_top rows
+    row_end = crop_top + target_height if target_height is not None else height
+    arr = arr[crop_top:row_end, :width, [2, 1, 0, 3]]  # BGRA -> RGBA
     return np.ascontiguousarray(arr).tobytes()
 
 
@@ -116,12 +131,15 @@ def _wait_for_target_window(title_hint: str, timeout_s: float = 10.0, poll_inter
 
 
 class _StreamOutput(NSObject):
-    def initWithOnFrame_cropTop_(self, on_frame: Callable[[bytes], None], crop_top: int):
+    def initWithOnFrame_cropTop_targetHeight_(
+        self, on_frame: Callable[[bytes], None], crop_top: int, target_height: int
+    ):
         self = objc.super(_StreamOutput, self).init()  # noqa: PLW0642 -- required by the PyObjC initWith... idiom
         if self is None:
             return None
         self._on_frame = on_frame
         self._crop_top = crop_top
+        self._target_height = target_height
         self._frame_count = 0
         self._failure_count = 0
         self._lock = threading.Lock()
@@ -147,7 +165,9 @@ class _StreamOutput(NSObject):
 
         try:
             self._on_frame(
-                bgra_buffer_to_rgba_bytes(raw, width, height, bytes_per_row, self._crop_top)
+                bgra_buffer_to_rgba_bytes(
+                    raw, width, height, bytes_per_row, self._crop_top, self._target_height
+                )
             )
         except Exception:
             with self._lock:
@@ -190,6 +210,7 @@ class SckCapture:
         fps: int,
         on_frame: Callable[[bytes], None],
         crop_top: int = 0,
+        native_capture_height: int | None = None,
     ) -> None:
         self._window_title_hint = window_title_hint
         self._width = width
@@ -197,6 +218,14 @@ class SckCapture:
         self._fps = fps
         self._on_frame = on_frame
         self._crop_top = crop_top
+        # Defaults to the old assumption (captured window is exactly
+        # height + crop_top tall, no extra margin) for callers with no
+        # headroom to worry about. launcher.py's sck path always passes this
+        # explicitly, since its window is launched taller than that on
+        # purpose -- see _CHROME_APP_MODE_HEADROOM_PX.
+        self._native_capture_height = (
+            native_capture_height if native_capture_height is not None else height + crop_top
+        )
         self._stream = None
         self._output = None
 
@@ -209,10 +238,13 @@ class SckCapture:
         """
         config = SCK.SCStreamConfiguration.alloc().init()
         config.setWidth_(self._width)
-        # The captured window is crop_top pixels taller than the target
-        # resolution (Chrome's own toolbar) -- request its full native
-        # height here; _StreamOutput crops the extra rows off per frame.
-        config.setHeight_(self._height + self._crop_top)
+        # Request the window's actual full native height so ScreenCaptureKit
+        # never has to resize what it captures to fit this -- any resize
+        # here would reintroduce exactly the kind of soft misalignment this
+        # whole crop_top/native_capture_height scheme exists to avoid.
+        # _StreamOutput crops both crop_top off the top and everything past
+        # self._height off the bottom per frame instead.
+        config.setHeight_(self._native_capture_height)
         config.setMinimumFrameInterval_(CM.CMTimeMake(1, self._fps))
         config.setQueueDepth_(8)
         config.setShowsCursor_(False)
@@ -225,8 +257,8 @@ class SckCapture:
         content_filter = SCK.SCContentFilter.alloc().initWithDesktopIndependentWindow_(window)
         config = self._build_stream_config()
 
-        self._output = _StreamOutput.alloc().initWithOnFrame_cropTop_(
-            self._on_frame, self._crop_top
+        self._output = _StreamOutput.alloc().initWithOnFrame_cropTop_targetHeight_(
+            self._on_frame, self._crop_top, self._height
         )
         delegate = _StreamDelegate.alloc().init()
         self._stream = SCK.SCStream.alloc().initWithFilter_configuration_delegate_(

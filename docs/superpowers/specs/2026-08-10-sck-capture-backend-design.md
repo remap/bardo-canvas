@@ -417,3 +417,53 @@ virtual displays** (`NSScreen.screens()`, `NSApplication.sharedApplication()`
 + a brief `CFRunLoopRunInMode` spin first) **before assuming a code
 regression** — the two fixes above should make new leaks rare, but do not
 guarantee the underlying private API never gets stuck on its own.
+
+## 11. Addendum (2026-08-28): Chrome window-chrome fit — `--app=` mode, headroom, and live measurement
+
+Found via a downstream operator's report that a physical LED screen's
+NDI-fed crop showed slivers of neighboring screens plus lost rows at the
+bottom, reproduced identically on two independent consumers (TouchDesigner
+and the physical LED processor) — ruling out either of those as the cause.
+A synthetic pixel-exact test pattern (`apps/ndi-grid-test/`, see the main
+README) confirmed the compositor and the in-page canvas screenshot path
+(`/api/screenshot`) were both already pixel-perfect; the gap was
+specifically in what `sck` captures versus what that screenshot path
+produces, since only the former goes through a real OS window and
+ScreenCaptureKit.
+
+Root cause: `_sck_chrome_window_size` requested a Chrome window
+`_CHROME_TOOLBAR_HEIGHT_PX` (87px) taller than `config.height`, to leave
+room for Chrome's tab-strip/address-bar above the page content, with that
+strip cropped off every captured frame after the fact. But the virtual
+display hosting that window was created at exactly `config.width x
+config.height` — a window can never actually be taller than the display it's
+on, so the OS silently clipped the window back down, and the resulting
+short `window.innerHeight` made `layout-driver.js`'s `rescale()` shrink the
+whole composited wall by a few percent to fit — read from the outside as "a
+few pixels of soft misalignment at internal seams," not an obvious failure.
+
+Fixed by switching Chrome's `sck`-path launch from a plain tabbed window to
+`--app=<url>` mode (bare window, no tab-strip/address-bar, and — unlike
+`--kiosk` — no fullscreen/Space transition), launched via Playwright's
+`launch_persistent_context()` (a plain `launch()` + `new_context()` never
+sees the window `--app=` opens on its own), with the virtual display grown
+to match the requested window height. The exact chrome height above the
+page content is no longer assumed from a constant at all — it was found,
+live, to jitter by a couple pixels between otherwise-identical launches —
+it's measured fresh every launch (`window.innerWidth`/`innerHeight` against
+the requested window size) and used to crop both the top (the measured
+chrome height) and the bottom (leftover intentional headroom margin) of the
+raw captured pixel buffer directly, entirely in `numpy`, with no OS window
+resize involved (an earlier attempt to resize the actual window via CDP's
+`Browser.setWindowBounds` introduced a *worse*, harder-to-explain bug: on
+this window, flush against the display's exact width and height, a bounds
+update also shifted width by -20px, reproducibly, for reasons not fully
+understood).
+
+Full writeup, including why this generalizes beyond this repo and how to
+verify it without trusting it by eye: `docs/sck-chrome-window-fit.md`. Code:
+`ndi_broadcaster/launcher.py` (`_CHROME_APP_MODE_HEADROOM_PX`,
+`_sck_chrome_window_size`, `_measure_chrome_overhead_px`,
+`_measure_sck_crop_top`, `_run_sck_session`) and
+`ndi_broadcaster/capture_sck.py` (`SckCapture.native_capture_height`,
+`bgra_buffer_to_rgba_bytes`'s `target_height`).

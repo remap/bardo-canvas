@@ -8,6 +8,7 @@ import os
 import platform
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -244,24 +245,43 @@ def _chrome_launch_args() -> list[str]:
 
 SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
 
-# Chrome's own tab-strip + address-bar height in a plain headed window (single
-# tab, no bookmarks bar) -- measured live via window.outerHeight minus
-# window.innerHeight, consistently 87px across repeated runs of this Chrome
-# version on macOS, for both Playwright's bundled Chrome for Testing and real
-# Chrome. --kiosk removes it cleanly, but was found, live, to force macOS's
-# native fullscreen Space transition for any borderless window sized to
-# exactly fill a display -- with "Displays have separate Spaces" off (System
-# Settings > Desktop & Dock > Mission Control, off by default on some Macs),
-# that transition visibly disrupts whatever's on the operator's other
-# displays, which is unacceptable for a background broadcaster process.
-# Requesting a window this many pixels taller than the target resolution,
-# then cropping that strip off the top of every captured frame (SckCapture's
-# crop_top), gets an exact-resolution capture with zero window-manager side
-# effects. If this ever drifts (a Chrome update changes the toolbar height),
-# the visible symptom is a thin sliver of toolbar or black bar at the very
-# top of the captured image -- remeasure via outerHeight - innerHeight in a
-# real headed launch and update this constant.
-_CHROME_TOOLBAR_HEIGHT_PX = 87
+# Chrome's own window-chrome height in --app= mode (a bare window with no
+# tab-strip or address bar -- just a minimal native title bar) was found live
+# NOT to be a fixed pixel count: measured at 30px on one broadcaster launch
+# and 28px on the very next, with nothing else changed and the virtual
+# display itself confirmed (via CGDisplayPixelsHigh) to be exactly the
+# requested size both times -- some ±1-2px jitter in exactly how much of a
+# requested --window-size Chrome's own title bar eats into is apparently
+# inherent to this environment, not a one-time measurement error. A single
+# hardcoded constant therefore can never land on an exact match run over run:
+# see this file's git history around 2026-08-28 for two rounds of "measure,
+# hardcode, still off by a pixel or two" before this was replaced.
+#
+# So this is no longer used as an exact prediction. It's just headroom: the
+# window (and the virtual display hosting it, which can never show a window
+# taller than itself -- the OS silently clips it back down otherwise) is
+# requested this many pixels taller than config.height, comfortably above
+# the observed 28-30px range so window.innerHeight is guaranteed >=
+# config.height regardless of that run's exact jitter. _run_sck_session then
+# measures window.innerHeight on the ACTUAL launched page directly and
+# computes crop_top from that measurement -- see its
+# _measure_chrome_overhead_px -- rather than assuming any fixed number, which
+# is what makes the final capture exact despite the jitter above.
+#
+# This used to be 87px in plain (tabbed) mode -- --kiosk would remove that
+# cleanly too, but was found, live, to force macOS's native fullscreen Space
+# transition for any borderless window sized to exactly fill a display --
+# with "Displays have separate Spaces" off (System Settings > Desktop & Dock
+# > Mission Control, off by default on some Macs), that transition visibly
+# disrupts whatever's on the operator's other displays, unacceptable for a
+# background broadcaster process. --app= removes the tab-strip/address-bar
+# without invoking any fullscreen/Space API, so it doesn't have that problem.
+#
+# physical_display mode cannot grow its display to add this headroom (real
+# hardware has no slack), so a physical-mode display sized to exactly
+# config.height can still hit the clipping bug this constant works around
+# for virtual mode -- unfixed here, out of scope for today.
+_CHROME_APP_MODE_HEADROOM_PX = 60
 
 # Both browser.close() and Playwright's own async_playwright() context-manager
 # exit (playwright.stop(), an alias for its __aexit__) wait on their
@@ -288,23 +308,27 @@ def _sck_chrome_window_size(config: BroadcasterConfig) -> tuple[int, int]:
     """The (width, height) to launch Chrome's window at for the sck backend.
 
     Deliberately factored out of _capture_loop_sck so this exact arithmetic
-    -- window height = config.height + _CHROME_TOOLBAR_HEIGHT_PX -- is
-    directly unit-testable against the same crop_top value passed to
-    SckCapture, without needing to mock Playwright or ScreenCaptureKit. The
-    two must always move together: SckCapture crops exactly crop_top rows
-    off the top of every captured frame, so a window shorter or taller than
-    config.height + crop_top leaves a toolbar sliver or a black bar at the
-    top of every frame on the live wall.
+    -- window height = config.height + _CHROME_APP_MODE_HEADROOM_PX -- is
+    directly unit-testable without needing to mock Playwright or
+    ScreenCaptureKit. This is deliberately more headroom than Chrome's actual
+    window-chrome needs (see _CHROME_APP_MODE_HEADROOM_PX's comment on why an
+    exact match isn't reliable run over run): _measure_chrome_overhead_px
+    measures the real gap on the actual launched window and that measurement,
+    not this function's return value, is what SckCapture's crop_top is built
+    from.
 
     Takes config, not the resolved display, even though the window is
-    positioned on that display: _validate_sck_display_mode and (in physical
-    mode) find_physical_display's resolution check both make display.width/
-    height == config.width/height a hard precondition before this is ever
-    called, and SckCapture itself is built from config.width/height too --
-    anchoring this function to the same source keeps that one invariant
-    self-evident instead of incidentally true.
+    positioned on that display: SckCapture itself is built from
+    config.width/height, and (virtual mode) the display is now sized to
+    config.width x (config.height + _CHROME_APP_MODE_HEADROOM_PX) specifically
+    so this taller window fits without the OS clipping it back down -- see
+    _CHROME_APP_MODE_HEADROOM_PX's comment. Physical mode's display is real
+    hardware and cannot grow to match; find_physical_display's resolution
+    check still requires display.width/height == config.width/height there,
+    so a physical display sized to exactly config.height keeps the old
+    clipping bug this function's height formula would otherwise reintroduce.
     """
-    return config.width, config.height + _CHROME_TOOLBAR_HEIGHT_PX
+    return config.width, config.height + _CHROME_APP_MODE_HEADROOM_PX
 
 
 def _validate_sck_display_mode(config: BroadcasterConfig) -> None:
@@ -344,8 +368,8 @@ async def _capture_loop_sck(
 ) -> None:
     # Imported lazily: capture_sck/virtual_display/physical_display all
     # import PyObjC frameworks at module scope, which must not become a hard
-    # requirement for anyone running only the cdp backend.
-    from .capture_sck import SckCapture
+    # requirement for anyone running only the cdp backend. capture_sck's
+    # import lives in _run_sck_session instead, closer to its only use.
     from .physical_display import find_physical_display
     from .virtual_display import ensure_helper_built, start_vdisplay_helper, wait_for_settled_bounds
 
@@ -354,10 +378,18 @@ async def _capture_loop_sck(
         if config.sck_display_mode == "virtual":
             helper_dir = REPO_ROOT / "ndi_broadcaster" / "vdisplay_helper"
             binary_path = ensure_helper_built(helper_dir)
+            # +_CHROME_APP_MODE_HEADROOM_PX: the window placed on this display is
+            # requested that much taller than config.height (see
+            # _sck_chrome_window_size), and a window can never actually be
+            # taller than the display hosting it -- the OS silently clips it
+            # back down otherwise. Sizing the display to match is what makes
+            # the "request a taller window, crop the top" scheme underneath
+            # actually work instead of silently clipping.
+            display_height = config.height + _CHROME_APP_MODE_HEADROOM_PX
             vdisplay_proc, info = start_vdisplay_helper(
-                binary_path, config.width, config.height, config.sck_virtual_display_name
+                binary_path, config.width, display_height, config.sck_virtual_display_name
             )
-            display = wait_for_settled_bounds(info.display_id, config.width, config.height)
+            display = wait_for_settled_bounds(info.display_id, config.width, display_height)
         else:
             display = find_physical_display(
                 config.sck_physical_display_name, config.width, config.height
@@ -367,77 +399,45 @@ async def _capture_loop_sck(
         playwright_cm = async_playwright()
         playwright = await playwright_cm.start()
         try:
-            browser = await playwright.chromium.launch(
-                headless=False,
-                args=[
-                    *_chrome_launch_args(),
-                    f"--window-position={display.x},{display.y}",
-                    # Requested taller than the target resolution to compensate
-                    # for Chrome's own tab-strip/address-bar height -- see
-                    # _CHROME_TOOLBAR_HEIGHT_PX. SckCapture crops that many rows
-                    # off the top of every captured frame, so the delivered
-                    # frame is still exactly config.width x config.height.
-                    f"--window-size={window_width},{window_height}",
-                    "--ignore-certificate-errors",
-                    "--disable-session-crashed-bubble",
-                    "--noerrdialogs",
-                ],
-            )
-            context = await browser.new_context(
-                # no_viewport=True (not viewport=None) is what actually disables
-                # Playwright's forced 1280x720 default viewport, confirmed live
-                # during the proof-of-concept spike.
-                no_viewport=True,
-                ignore_https_errors=True,
-                permissions=["microphone"],
-            )
-            page = await context.new_page()
-            await page.goto(config.target_url)
-            # A framework-controlled, app-independent title: apps each set
-            # their own <title>, so SCShareableContent window matching can't
-            # rely on any single app's page title.
-            await page.evaluate("title => { document.title = title; }", SCK_WINDOW_TITLE)
-
-            frame_slot = _LatestFrameSlot()
-            sender_thread = threading.Thread(
-                target=_sender_thread_loop,
-                args=(frame_slot, sender, config, stop_event),
-                kwargs={"decode_fn": _decode_raw_rgba_frame(config.width, config.height)},
-                daemon=True,
-            )
-            sender_thread.start()
-
-            # capture construction/start() is inside this try too: either can
-            # raise (window lookup timeout, addStreamOutput failure, startCapture
-            # timeout/error) after frames may have already begun flowing, and the
-            # sender thread + browser must still be torn down in that case rather
-            # than leaking a daemon thread stuck in sender.send() past this
-            # function's return.
-            capture: SckCapture | None = None
-            try:
-                capture = SckCapture(
-                    SCK_WINDOW_TITLE,
-                    config.width,
-                    config.height,
-                    config.fps,
-                    on_frame=frame_slot.put,
-                    crop_top=_CHROME_TOOLBAR_HEIGHT_PX,
+            with tempfile.TemporaryDirectory(prefix="layout-driver-sck-profile-") as profile_dir:
+                # launch_persistent_context (not launch() + new_context()):
+                # --app= pre-navigates its own window before Playwright's CDP
+                # session attaches, and a plain launch() + new_context()'s
+                # freshly-created context/page never sees that window at all
+                # (confirmed live -- browser.contexts() came back empty right
+                # after a --app= launch(), and a second new_context() created
+                # an entirely separate, untracked window with the normal
+                # tab-strip/toolbar still showing, instead of controlling the
+                # --app= one). A persistent context launch attaches to the
+                # browser's actual initial session, so the --app= window
+                # shows up in context.pages directly -- confirmed live via
+                # the same launch args below.
+                context = await playwright.chromium.launch_persistent_context(
+                    profile_dir,
+                    headless=False,
+                    # no_viewport=True (not viewport=None) is what actually disables
+                    # Playwright's forced 1280x720 default viewport, confirmed live
+                    # during the proof-of-concept spike.
+                    no_viewport=True,
+                    ignore_https_errors=True,
+                    permissions=["microphone"],
+                    args=[
+                        *_chrome_launch_args(),
+                        f"--app={config.target_url}",
+                        f"--window-position={display.x},{display.y}",
+                        # Requested taller than the target resolution to leave
+                        # comfortable headroom for --app= mode's title bar --
+                        # see _CHROME_APP_MODE_HEADROOM_PX. The exact amount to
+                        # crop off the top is measured live below
+                        # (_measure_chrome_overhead_px), not assumed from this
+                        # headroom value.
+                        f"--window-size={window_width},{window_height}",
+                        "--ignore-certificate-errors",
+                        "--disable-session-crashed-bubble",
+                        "--noerrdialogs",
+                    ],
                 )
-                capture.start()
-                while not stop_event.is_set():
-                    await asyncio.sleep(0.5)
-            finally:
-                # stop_event first, unconditionally: it cannot raise, and
-                # everything after it (sender thread join, browser close)
-                # must still run even if capture.stop() itself raises (e.g.
-                # stopCaptureWithCompletionHandler_ on a stream that never
-                # finished starting).
-                stop_event.set()
-                if capture is not None:
-                    with contextlib.suppress(Exception):
-                        capture.stop()
-                sender_thread.join(timeout=5.0)
-                await _shutdown_with_timeout(browser.close(), "browser.close()")
+                await _run_sck_session(config, context, sender, stop_event)
         finally:
             await _shutdown_with_timeout(playwright.stop(), "Playwright driver shutdown")
     finally:
@@ -447,6 +447,133 @@ async def _capture_loop_sck(
                 vdisplay_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 vdisplay_proc.kill()
+
+
+async def _measure_chrome_overhead_px(page, config: BroadcasterConfig, window_height: int) -> int:
+    """How many rows of Chrome's own window-chrome sit above the page content,
+    given a window actually sized window_width(=config.width) x window_height.
+
+    Not a fixed constant -- see _CHROME_APP_MODE_HEADROOM_PX's comment: this
+    was found live to jitter by a couple pixels between otherwise-identical
+    launches, so it's measured fresh on the actual window about to be
+    captured instead of assumed. window.innerWidth is asserted equal to
+    config.width (not just measured) because if that one ever starts
+    drifting too, crop_top alone can no longer make the capture exact --
+    that would need a horizontal crop this function doesn't compute, and
+    silently proceeding would produce a capture wrong in a way this whole
+    function was written to prevent.
+    """
+    inner_width, inner_height = await page.evaluate("[window.innerWidth, window.innerHeight]")
+    if inner_width != config.width:
+        raise RuntimeError(
+            f"--app= window's innerWidth ({inner_width}) != config.width ({config.width}); "
+            "unlike innerHeight, this code has no horizontal crop to compensate for that."
+        )
+    overhead = window_height - inner_height
+    logger.info(
+        "sck: measured %dpx of window chrome above the page content (window %dx%d, inner %dx%d)",
+        overhead,
+        config.width,
+        window_height,
+        inner_width,
+        inner_height,
+    )
+    return overhead
+
+
+async def _measure_sck_crop_top(page, config: BroadcasterConfig) -> int:
+    """The crop_top SckCapture should use for the window as actually launched.
+
+    The window is launched at config.height + _CHROME_APP_MODE_HEADROOM_PX --
+    generous headroom, not a precise target (see that constant's comment) --
+    specifically so it's never clipped by the display no matter how the real
+    chrome overhead jitters this run. That headroom is real, unused black
+    space below the composited wall inside the window (rescale() pins scale
+    to 1.0 via the width ratio, so the wall itself is never stretched to
+    fill it).
+
+    An earlier version of this function resized the actual OS window down to
+    remove that leftover margin (via CDP's Browser.setWindowBounds), so
+    SckCapture could crop only the top as it always had. That was abandoned:
+    live testing found this specific window (positioned flush against the
+    virtual display's exact width and height, zero slack on any edge) came
+    back from a resize with its width *also* shifted by -20px, reproducibly,
+    regardless of what bounds were requested -- a small-scale test window
+    with real margin on a real display did not reproduce this, so it looks
+    tied to being flush against the display edge, not a general CDP quirk,
+    but chasing it further wasn't worth it. The window is left at its full
+    launched size instead, and SckCapture crops the leftover margin off the
+    bottom of every frame too (its native_capture_height parameter) -- pure
+    numpy slicing on an already-delivered pixel buffer, with no OS window
+    manager involved to reintroduce this class of surprise.
+    """
+    _, headroom_height = _sck_chrome_window_size(config)
+    return await _measure_chrome_overhead_px(page, config, headroom_height)
+
+
+async def _run_sck_session(
+    config: BroadcasterConfig,
+    context,
+    sender: VideoSender,
+    stop_event: threading.Event,
+) -> None:
+    from .capture_sck import SckCapture
+
+    try:
+        # --app= already navigated this page to config.target_url before
+        # Playwright ever attached -- there is nothing to page.goto() here.
+        page = context.pages[0]
+        await page.wait_for_load_state("load")
+        # A framework-controlled, app-independent title: apps each set
+        # their own <title>, so SCShareableContent window matching can't
+        # rely on any single app's page title.
+        await page.evaluate("title => { document.title = title; }", SCK_WINDOW_TITLE)
+
+        crop_top = await _measure_sck_crop_top(page, config)
+        _, native_capture_height = _sck_chrome_window_size(config)
+
+        frame_slot = _LatestFrameSlot()
+        sender_thread = threading.Thread(
+            target=_sender_thread_loop,
+            args=(frame_slot, sender, config, stop_event),
+            kwargs={"decode_fn": _decode_raw_rgba_frame(config.width, config.height)},
+            daemon=True,
+        )
+        sender_thread.start()
+
+        # capture construction/start() is inside this try too: either can
+        # raise (window lookup timeout, addStreamOutput failure, startCapture
+        # timeout/error) after frames may have already begun flowing, and the
+        # sender thread + browser must still be torn down in that case rather
+        # than leaking a daemon thread stuck in sender.send() past this
+        # function's return.
+        capture: SckCapture | None = None
+        try:
+            capture = SckCapture(
+                SCK_WINDOW_TITLE,
+                config.width,
+                config.height,
+                config.fps,
+                on_frame=frame_slot.put,
+                crop_top=crop_top,
+                native_capture_height=native_capture_height,
+            )
+            capture.start()
+            while not stop_event.is_set():
+                await asyncio.sleep(0.5)
+        finally:
+            # stop_event first, unconditionally: it cannot raise, and
+            # everything after it (sender thread join, context close)
+            # must still run even if capture.stop() itself raises (e.g.
+            # stopCaptureWithCompletionHandler_ on a stream that never
+            # finished starting).
+            stop_event.set()
+            if capture is not None:
+                with contextlib.suppress(Exception):
+                    capture.stop()
+            sender_thread.join(timeout=5.0)
+    finally:
+        await _shutdown_with_timeout(context.close(), "context.close()")
 
 
 async def _capture_loop(

@@ -9,7 +9,7 @@ def test_get_screens_returns_computed_rects(client):
     assert response.status_code == 200
     body = response.json()
     screen_f = next(s for s in body["screens"] if s["id"] == "F")
-    assert screen_f["rect"] == {"x": 220, "y": 80, "width": 1800, "height": 1400}
+    assert screen_f["rect"] == {"x": 0, "y": 0, "width": 1800, "height": 1400}
 
 
 def test_get_audio_config(client):

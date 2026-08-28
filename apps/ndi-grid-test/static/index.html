@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Layout Driver — NDI Grid Test</title>
+  </head>
+  <body>
+    <script type="module">
+      import { initLayoutDriver, enableScreenshotResponder } from "/layout-driver.js";
+
+      // One continuous 200x200 grid drawn over the whole 3840x2160 canvas, indexed
+      // in canvas-global coordinates and then drawn per-screen in each screen's own
+      // local coordinate space. Because every square's number/position comes from
+      // its GLOBAL column/row (not anything screen-local), a square lines up
+      // identically across a screen boundary as it would if one screen covered the
+      // whole canvas -- any seam, duplication, or shift introduced by slicing the
+      // canvas into screens (or by NDI capture/broadcast downstream) shows up as a
+      // visibly wrong number or a misaligned square edge.
+      //
+      // A 1px black cross is also drawn at every module-grid intersection (every
+      // 200px corner) via fillRect at integer coordinates, not ctx.stroke -- a
+      // stroked 1px line is centered on its path, so it actually spans -0.5..+0.5
+      // and renders as a blurred, antialiased 2px line instead of a crisp 1px one.
+      // Each screen draws only its own local half of a shared cross; if slicing is
+      // pixel-exact, the two halves recombine into one unbroken, unblurred cross
+      // wherever this is captured downstream -- any break, doubling, offset, or
+      // softening there is direct visual evidence of a real alignment/aliasing
+      // issue in this pipeline or downstream, not an artifact of how the cross
+      // itself was drawn.
+      const driver = await initLayoutDriver();
+      window.LayoutDriver = driver;
+
+      const moduleSize = driver.layoutConfig.module_size;
+      const totalCols = Math.ceil(driver.layoutConfig.canvas.width / moduleSize);
+      const crossArm = 10;
+
+      for (const screen of driver.layoutConfig.screens) {
+        const container = driver.getScreenContainer(screen.id);
+        const canvas = document.createElement("canvas");
+        canvas.width = container.width;
+        canvas.height = container.height;
+        container.element.appendChild(canvas);
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingEnabled = false;
+
+        const originX = screen.rect.x;
+        const originY = screen.rect.y;
+        const colStart = Math.floor(originX / moduleSize);
+        const colEnd = Math.floor((originX + container.width - 1) / moduleSize);
+        const rowStart = Math.floor(originY / moduleSize);
+        const rowEnd = Math.floor((originY + container.height - 1) / moduleSize);
+
+        for (let row = rowStart; row <= rowEnd; row++) {
+          for (let col = colStart; col <= colEnd; col++) {
+            const localX = col * moduleSize - originX;
+            const localY = row * moduleSize - originY;
+            const index = row * totalCols + col;
+
+            ctx.fillStyle = `hsl(${(index * 47) % 360}, 55%, 40%)`;
+            ctx.fillRect(localX, localY, moduleSize, moduleSize);
+
+            ctx.fillStyle = "white";
+            ctx.textAlign = "center";
+            ctx.font = "bold 56px monospace";
+            ctx.fillText(String(index), localX + moduleSize / 2, localY + moduleSize / 2 - 6);
+            ctx.font = "18px monospace";
+            ctx.fillText(`c${col} r${row}`, localX + moduleSize / 2, localY + moduleSize / 2 + 24);
+          }
+        }
+
+        // Crosses at every module-grid intersection touching this screen,
+        // including the ones sitting exactly on a shared edge with a neighbor.
+        for (let row = rowStart; row <= rowEnd + 1; row++) {
+          for (let col = colStart; col <= colEnd + 1; col++) {
+            const gx = col * moduleSize - originX;
+            const gy = row * moduleSize - originY;
+            ctx.fillStyle = "black";
+            ctx.fillRect(gx, gy - crossArm, 1, crossArm * 2 + 1);
+            ctx.fillRect(gx - crossArm, gy, crossArm * 2 + 1, 1);
+          }
+        }
+
+        ctx.fillStyle = "yellow";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.font = "bold 22px monospace";
+        ctx.fillText(`${screen.name} (${screen.id})`, 6, 6);
+      }
+
+      enableScreenshotResponder(driver);
+
+      // Diagnostic readout, deliberately a body-level element OUTSIDE
+      // #layout-driver-root -- root gets CSS-scaled by buildRoot()'s rescale()
+      // to fit the real browser window, but this div is a sibling of root, so
+      // it is NOT scaled and reports the window's true, unscaled numbers.
+      // /api/screenshot composites only from each screen's own canvas
+      // (measureScreenPlacements()), so this div never appears there; it only
+      // shows up in whatever actually captures the live OS-level window
+      // (ScreenCaptureKit, in the sck backend this repo defaults to) -- which
+      // is the one capture path a canvas-only screenshot can't validate. A
+      // scale other than 1.0000, or innerWidth/innerHeight not equal to
+      // 3840/2160, means the composited wall is being resized before capture
+      // even sees it -- something no downstream crop box can compensate for.
+      const diag = document.createElement("div");
+      diag.style.position = "fixed";
+      diag.style.top = "0";
+      diag.style.right = "0";
+      diag.style.background = "black";
+      diag.style.color = "#0f0";
+      diag.style.font = "16px monospace";
+      diag.style.padding = "4px 8px";
+      diag.style.zIndex = "999999";
+      function updateDiag() {
+        const canvasWidth = driver.layoutConfig.canvas.width;
+        const canvasHeight = driver.layoutConfig.canvas.height;
+        const scale = Math.min(window.innerWidth / canvasWidth, window.innerHeight / canvasHeight);
+        diag.textContent =
+          `inner=${window.innerWidth}x${window.innerHeight} ` +
+          `canvas=${canvasWidth}x${canvasHeight} ` +
+          `scale=${scale.toFixed(4)} dpr=${window.devicePixelRatio}`;
+      }
+      updateDiag();
+      window.addEventListener("resize", updateDiag);
+      document.body.appendChild(diag);
+    </script>
+  </body>
+</html>
