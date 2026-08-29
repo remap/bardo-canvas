@@ -17,7 +17,7 @@ its own server, not yt-matrix's:
    target_url (what the captured browser actually navigates to) stays
    /layout.
 
-2. control_window_url/control_display_index have no env-var override in
+2. control_window_url/control_display_name have no env-var override in
    layout-driver (unlike target_url's LAYOUT_DRIVER_TARGET_URL) -- they are
    read once, straight off the loaded BroadcasterConfig. This patches
    load_broadcaster_config to layer yt-matrix's control-window choice onto
@@ -52,7 +52,7 @@ def _load_with_yt_matrix_control_window(path):
     return config.model_copy(
         update={
             "control_window_url": "https://localhost:8444/layout-control",
-            "control_display_index": 0,
+            "control_display_name": "Retina",
         }
     )
 

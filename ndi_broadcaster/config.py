@@ -28,7 +28,15 @@ class BroadcasterConfig(BaseModel):
     # find it another way. None (the default) opens nothing. cdp backend
     # ignores this entirely (headless, no window to place).
     control_window_url: str | None = None
-    control_display_index: int = 0
+    # Name-based, not index-based -- NSScreen.screens()[0] is only "the
+    # screen with the menu bar" at the moment of the call, not a stable
+    # physical position (confirmed live: it did not reliably resolve to the
+    # intended monitor). None falls back to that same unreliable "main
+    # screen" reading; set this (substring match, same convention as
+    # sck_physical_display_name) for a display that's actually predictable.
+    control_display_name: str | None = None
+    control_window_width: int = 1200
+    control_window_height: int = 600
 
 
 def load_broadcaster_config(path: Path) -> BroadcasterConfig:

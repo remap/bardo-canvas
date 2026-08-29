@@ -1,6 +1,10 @@
 import pytest
 
-from ndi_broadcaster.physical_display import find_display_by_index, find_physical_display
+from ndi_broadcaster.physical_display import (
+    find_display_by_name,
+    find_physical_display,
+    main_screen,
+)
 from ndi_broadcaster.virtual_display import DisplayInfo
 
 
@@ -42,7 +46,7 @@ def test_find_physical_display_raises_on_resolution_mismatch(monkeypatch):
         find_physical_display("ultrafine", 3840, 2160)
 
 
-def test_find_display_by_index_returns_the_nth_display(monkeypatch):
+def test_find_display_by_name_matches_case_insensitive_substring(monkeypatch):
     first = DisplayInfo(1, 0, 0, 1728, 1117)
     second = DisplayInfo(3, 1920, 0, 3840, 2160)
     monkeypatch.setattr(
@@ -50,25 +54,26 @@ def test_find_display_by_index_returns_the_nth_display(monkeypatch):
         lambda: [("Built-in Retina Display", first), ("LG UltraFine 4K", second)],
     )
 
-    assert find_display_by_index(0) == first
-    assert find_display_by_index(1) == second
+    assert find_display_by_name("retina") == first
+    assert find_display_by_name("UltraFine") == second
 
 
-def test_find_display_by_index_raises_listing_known_names_when_out_of_range(monkeypatch):
+def test_find_display_by_name_raises_listing_known_names_when_no_match(monkeypatch):
     monkeypatch.setattr(
         "ndi_broadcaster.physical_display._enumerate_screens",
         lambda: [("Built-in Retina Display", DisplayInfo(1, 0, 0, 1728, 1117))],
     )
 
     with pytest.raises(ValueError, match="Built-in Retina Display"):
-        find_display_by_index(1)
+        find_display_by_name("Nonexistent Display")
 
 
-def test_find_display_by_index_rejects_negative_index(monkeypatch):
+def test_main_screen_returns_the_first_enumerated_display(monkeypatch):
+    first = DisplayInfo(1, 0, 0, 1728, 1117)
+    second = DisplayInfo(3, 1920, 0, 3840, 2160)
     monkeypatch.setattr(
         "ndi_broadcaster.physical_display._enumerate_screens",
-        lambda: [("Built-in Retina Display", DisplayInfo(1, 0, 0, 1728, 1117))],
+        lambda: [("Built-in Retina Display", first), ("LG UltraFine 4K", second)],
     )
 
-    with pytest.raises(ValueError):
-        find_display_by_index(-1)
+    assert main_screen() == first

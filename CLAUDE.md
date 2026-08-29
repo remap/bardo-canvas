@@ -82,15 +82,33 @@ black for this app's canvases.
 
 **`control_window_url`** (sck only, `config/broadcaster.yaml`) opts a second, positioned
 window into the SAME Chrome profile the broadcast window runs in — `_open_control_window`
-in `launcher.py`, called once the `--app=` page has loaded. Placed via `window.open()`'s
-popup features (`left`/`top`/`width`/`height`), evaluated on the broadcast page itself, at
-the bounds of `control_display_index` (`physical_display.find_display_by_index`) — not a
-fresh Playwright page/CDP window-bounds call, since Chrome already honours that feature
-string at creation time. `None` (the default) opens nothing; most apps have no second
-window to open. Same profile is the entire point: it's what lets a page like yt-matrix's
-`/layout-control` reach the broadcast page over `BroadcastChannel`, which only bridges tabs
-within one browser process — a control page opened in an operator's own separate everyday
-browser, or the `cdp` backend's headless instance, can never connect to this one.
+in `launcher.py`, called once the `--app=` page has loaded. `None` (the default) opens
+nothing; most apps have no second window to open. Same profile is the entire point: it's
+what lets a page like yt-matrix's `/layout-control` reach the broadcast page over
+`BroadcastChannel`, which only bridges tabs within one browser process — a control page
+opened in an operator's own separate everyday browser, or the `cdp` backend's headless
+instance, can never connect to this one.
+
+Placement is via CDP (`Browser.getWindowForTarget` + `Browser.setWindowBounds`), not
+`window.open()`'s popup features — confirmed live those get silently clamped to the
+*calling* window's own screen when targeting a genuinely different display, a deliberate
+Chrome restriction (cross-screen placement from page script needs the Window Management
+API's explicit, user-granted permission, which nothing here can obtain). CDP operates
+through the browser's own automation protocol, one level above that page-script sandbox
+restriction, so it can move a window to any connected display regardless.
+
+The target display is resolved by name (`control_display_name`, substring-matched against
+`NSScreen.localizedName` via `physical_display.find_display_by_name` — same convention as
+`sck_physical_display_name`), not by index: `NSScreen.screens()[0]` is only guaranteed to be
+"the screen containing the menu bar" *at the moment of the call* (Apple's own documented
+behavior), not a stable physical position — confirmed live an index-0 lookup did not
+reliably resolve to the intended monitor. `None` (the default) falls back to
+`physical_display.main_screen()`, i.e. that same unreliable reading; set
+`control_display_name` explicitly for anything that needs to be predictable.
+
+The window itself is sized to `control_window_width`/`control_window_height` (default
+1200×600), centered within the resolved display's bounds — not sized to the full display,
+which was the original bug (a control window that filled whichever screen it landed on).
 
 ## macOS virtual-display gotchas
 
@@ -123,14 +141,17 @@ see [`docs/vdisplay-doctor.md`](docs/vdisplay-doctor.md).
 Keep the display awake during a broadcast (`caffeinate -d`); virtual-display creation was
 observed becoming unreliable while the display slept.
 
-**`control_window_url`'s exact pixel placement has not been confirmed live.** The popup
-feature string (`window.open(..., "popup,left=...,top=...,width=...,height=..."`) is a
-request, not a guarantee — this exact codebase already found the analogous "requested
-window bounds" path for the *broadcast* window jitters a few pixels run over run (see
-`_CHROME_APP_MODE_HEADROOM_PX`'s comment) and, separately, that a CDP-driven resize of a
-window flush against a display's edge can shift its width unexpectedly. Verify the control
-window actually lands fully on `control_display_index`'s display (not clipped, not
-straddling two displays) on the real machine before relying on it in production.
+**`window.open()`'s popup features (`left`/`top`) were tried first and don't work for
+cross-screen placement** — confirmed live: Chrome silently clamps them to the calling
+window's own screen when the target is a genuinely different display. That's what drove
+the switch to CDP's `Browser.setWindowBounds` above. Even CDP placement is worth
+re-verifying after any change here: this exact codebase already found the analogous
+"requested window bounds" path for the *broadcast* window jitters a few pixels run over run
+(see `_CHROME_APP_MODE_HEADROOM_PX`'s comment), and a CDP-driven resize of a window flush
+against a display's edge can shift its width unexpectedly. Verify the control window
+actually lands fully on `control_display_name`'s display (not clipped, not straddling two
+displays) at the configured `control_window_width`/`control_window_height` on the real
+machine before relying on it in production.
 
 ## Conventions
 

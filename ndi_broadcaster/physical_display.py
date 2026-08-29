@@ -80,21 +80,41 @@ def find_physical_display(name_substring: str, expected_width: int, expected_hei
     )
 
 
-def find_display_by_index(index: int) -> DisplayInfo:
-    """Return the Nth connected display's real bounds, for placing a window
-    with no resolution requirement to enforce (unlike find_physical_display,
-    which also validates the broadcast display's point resolution against
-    broadcaster.yaml -- an operator console window has no such constraint,
-    it just needs to land somewhere visible).
+def find_display_by_name(name_substring: str) -> DisplayInfo:
+    """Match a connected display by NSScreen.localizedName substring
+    (case-insensitive), with no resolution requirement to enforce (unlike
+    find_physical_display, which also validates the broadcast display's
+    point resolution against broadcaster.yaml -- an operator console window
+    has no such constraint, it just needs to land on the right monitor).
 
-    Raises ValueError naming every connected display's actual name if index
-    is out of range, mirroring find_physical_display's error style.
+    Deliberately name-based, not index-based: NSScreen.screens()[0] is only
+    guaranteed to be "the screen containing the menu bar" at the moment of
+    the call (Apple's own documented behaviour), not a stable physical
+    position -- confirmed live: with a broadcast virtual display active,
+    index 0 did not reliably resolve to the display an operator actually
+    meant. A name survives that; an index doesn't.
+
+    Raises ValueError naming every connected display's actual name if no
+    match is found, mirroring find_physical_display's error style.
     """
     screens = _enumerate_screens()
-    if not 0 <= index < len(screens):
-        known_names = [name for name, _ in screens]
-        raise ValueError(
-            f"control_display_index={index} but only {len(screens)} display(s) "
-            f"are connected: {known_names}"
-        )
-    return screens[index][1]
+    lowered = name_substring.lower()
+    for name, info in screens:
+        if lowered in name.lower():
+            return info
+    known_names = sorted(name for name, _ in screens)
+    raise ValueError(
+        f"no connected display matched {name_substring!r}; "
+        f"connected display names: {known_names}"
+    )
+
+
+def main_screen() -> DisplayInfo:
+    """The screen NSScreen.screens()[0] currently reports -- "the screen
+    containing the menu bar" at the moment of the call, not a stable
+    physical position. Only a fallback for when control_display_name is
+    unset; see find_display_by_name's docstring for why a name is what
+    should actually be configured.
+    """
+    screens = _enumerate_screens()
+    return screens[0][1]

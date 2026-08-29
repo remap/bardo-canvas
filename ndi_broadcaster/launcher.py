@@ -535,17 +535,28 @@ async def _open_control_window(page, config: BroadcasterConfig) -> None:
     """
     if not config.control_window_url:
         return
-    from .physical_display import find_display_by_index
+    from .physical_display import find_display_by_name, main_screen
 
-    bounds = find_display_by_index(config.control_display_index)
+    display = (
+        find_display_by_name(config.control_display_name)
+        if config.control_display_name
+        else main_screen()
+    )
+    width = config.control_window_width
+    height = config.control_window_height
+    left = display.x + (display.width - width) // 2
+    top = display.y + (display.height - height) // 2
     logger.info(
-        "opening control window %r on display %d at %d,%d (%dx%d)",
+        "opening control window %r on display at %d,%d (%dx%d), centered at %d,%d (%dx%d)",
         config.control_window_url,
-        config.control_display_index,
-        bounds.x,
-        bounds.y,
-        bounds.width,
-        bounds.height,
+        display.x,
+        display.y,
+        display.width,
+        display.height,
+        left,
+        top,
+        width,
+        height,
     )
 
     context = page.context
@@ -577,10 +588,10 @@ async def _open_control_window(page, config: BroadcasterConfig) -> None:
         {
             "windowId": window_info["windowId"],
             "bounds": {
-                "left": bounds.x,
-                "top": bounds.y,
-                "width": bounds.width,
-                "height": bounds.height,
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height,
                 "windowState": "normal",
             },
         },

@@ -301,12 +301,16 @@ class _FakeBroadcastPage:
 def test_open_control_window_places_it_via_cdp_setwindowbounds(monkeypatch):
     config = BroadcasterConfig(
         control_window_url="https://localhost:8444/layout-control",
-        control_display_index=1,
+        control_display_name="Retina",
+        control_window_width=1200,
+        control_window_height=600,
     )
-    fake_bounds = _FakeDisplay(x=1920, y=0, width=1080, height=1920)
+    fake_display = _FakeDisplay(x=1920, y=0, width=1080, height=1920)
     monkeypatch.setattr(
-        "ndi_broadcaster.physical_display.find_display_by_index",
-        lambda index: fake_bounds if index == 1 else (_ for _ in ()).throw(AssertionError(index)),
+        "ndi_broadcaster.physical_display.find_display_by_name",
+        lambda name: (
+            fake_display if name == "Retina" else (_ for _ in ()).throw(AssertionError(name))
+        ),
     )
 
     context = _FakeContext()
@@ -327,28 +331,59 @@ def test_open_control_window_places_it_via_cdp_setwindowbounds(monkeypatch):
     methods = [method for method, _ in context._cdp.sent]
     assert methods == ["Browser.getWindowForTarget", "Browser.setWindowBounds"]
     _, bounds_params = context._cdp.sent[1]
+    # Centered within fake_display, at the configured fixed size -- not the
+    # full display bounds (that was the original bug: a 1920x1080+ display
+    # produced a control window that filled the whole screen).
     assert bounds_params == {
         "windowId": 42,
         "bounds": {
-            "left": fake_bounds.x,
-            "top": fake_bounds.y,
-            "width": fake_bounds.width,
-            "height": fake_bounds.height,
+            "left": fake_display.x + (fake_display.width - 1200) // 2,
+            "top": fake_display.y + (fake_display.height - 600) // 2,
+            "width": 1200,
+            "height": 600,
             "windowState": "normal",
         },
     }
     assert context.pages[0].load_state_waits == ["domcontentloaded"]
 
 
+def test_open_control_window_falls_back_to_main_screen_when_name_unset(monkeypatch):
+    config = BroadcasterConfig(
+        control_window_url="https://localhost:8444/layout-control",
+        control_display_name=None,
+        control_window_width=1200,
+        control_window_height=600,
+    )
+    fake_display = _FakeDisplay(x=0, y=0, width=1920, height=1080)
+    monkeypatch.setattr(
+        "ndi_broadcaster.physical_display.find_display_by_name",
+        lambda _name: (_ for _ in ()).throw(
+            AssertionError("must not be called when name is unset")
+        ),
+    )
+    monkeypatch.setattr("ndi_broadcaster.physical_display.main_screen", lambda: fake_display)
+
+    context = _FakeContext()
+    page = _FakeBroadcastPage(context)
+
+    asyncio.run(_open_control_window(page, config))
+
+    _, bounds_params = context._cdp.sent[1]
+    assert bounds_params["bounds"]["left"] == (1920 - 1200) // 2
+    assert bounds_params["bounds"]["top"] == (1080 - 600) // 2
+    assert bounds_params["bounds"]["width"] == 1200
+    assert bounds_params["bounds"]["height"] == 600
+
+
 def test_open_control_window_raises_if_the_window_never_appears(monkeypatch):
     monkeypatch.setattr("ndi_broadcaster.launcher._CONTROL_WINDOW_APPEAR_TIMEOUT_S", 0.05)
     config = BroadcasterConfig(
         control_window_url="https://localhost:8444/layout-control",
-        control_display_index=0,
+        control_display_name=None,
     )
     monkeypatch.setattr(
-        "ndi_broadcaster.physical_display.find_display_by_index",
-        lambda _index: _FakeDisplay(x=0, y=0, width=1920, height=1080),
+        "ndi_broadcaster.physical_display.main_screen",
+        lambda: _FakeDisplay(x=0, y=0, width=1920, height=1080),
     )
 
     class _NeverOpensPage:

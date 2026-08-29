@@ -11,4 +11,6 @@ healthz_timeout_seconds: 30.0
 timecode_enabled: true                          # burn-in hh:mm:ss:ff overlay for monitoring
 timecode_position: "top"                        # "top" | "bottom"
 control_window_url: null                        # sck only; e.g. "https://localhost:8444/layout-control" -- null opens nothing
-control_display_index: 0                        # which connected display (index into System Settings' ordering) the control window opens on
+control_display_name: null                      # substring-matched against connected display names, e.g. "Retina" -- null falls back to whatever NSScreen reports as the main screen (unreliable, set this explicitly)
+control_window_width: 1200
+control_window_height: 600
