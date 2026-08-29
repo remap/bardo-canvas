@@ -27,13 +27,24 @@ its own server, not yt-matrix's:
 
 Run from this repo (layout-driver), with its own uv env:
     uv run python broadcast-yt-layout.py
+
+Also configures logging itself: launcher.py only calls logging.basicConfig
+under its own `if __name__ == "__main__":` guard, which this script -- as a
+separate entry point calling launcher.run() directly -- never executes.
+Without this, every logger.info() call in launcher.py (including the
+control-window placement diagnostics) is silently dropped by Python's
+handler-of-last-resort, which is WARNING-and-up only.
 """
 
+import logging
 import os
 
 os.environ["LAYOUT_DRIVER_TARGET_URL"] = "https://localhost:8444/layout"
 
+from layout_server.log_format import log_format
 from ndi_broadcaster import launcher
+
+logging.basicConfig(level=logging.INFO, format=log_format(dict(os.environ)))
 
 _real_wait_for_healthy = launcher.wait_for_healthy
 
