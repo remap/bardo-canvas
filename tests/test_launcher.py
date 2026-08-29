@@ -329,8 +329,18 @@ def test_open_control_window_places_it_via_cdp_setwindowbounds(monkeypatch):
 
     assert context.cdp_sessions_requested_for == [context.pages[0]]
     methods = [method for method, _ in context._cdp.sent]
-    assert methods == ["Browser.getWindowForTarget", "Browser.setWindowBounds"]
-    _, bounds_params = context._cdp.sent[1]
+    # State is normalized in its own call before the positioned bounds are
+    # sent -- some Chrome builds drop left/top when windowState changes in
+    # the same call that repositions -- and the result is read back after.
+    assert methods == [
+        "Browser.getWindowForTarget",
+        "Browser.setWindowBounds",
+        "Browser.setWindowBounds",
+        "Browser.getWindowBounds",
+    ]
+    _, normalize_params = context._cdp.sent[1]
+    assert normalize_params == {"windowId": 42, "bounds": {"windowState": "normal"}}
+    _, bounds_params = context._cdp.sent[2]
     # Centered within fake_display, at the configured fixed size -- not the
     # full display bounds (that was the original bug: a 1920x1080+ display
     # produced a control window that filled the whole screen).
@@ -368,7 +378,7 @@ def test_open_control_window_falls_back_to_main_screen_when_name_unset(monkeypat
 
     asyncio.run(_open_control_window(page, config))
 
-    _, bounds_params = context._cdp.sent[1]
+    _, bounds_params = context._cdp.sent[2]
     assert bounds_params["bounds"]["left"] == (1920 - 1200) // 2
     assert bounds_params["bounds"]["top"] == (1080 - 600) // 2
     assert bounds_params["bounds"]["width"] == 1200

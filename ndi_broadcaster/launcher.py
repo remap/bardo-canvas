@@ -583,10 +583,19 @@ async def _open_control_window(page, config: BroadcasterConfig) -> None:
 
     cdp = await context.new_cdp_session(control_page)
     window_info = await cdp.send("Browser.getWindowForTarget")
+    window_id = window_info["windowId"]
+
+    # Two calls, not one: a window created via window.open() can still carry
+    # a maximized/other non-normal state, and some Chrome builds silently
+    # drop the left/top half of setWindowBounds when windowState changes in
+    # the same call that repositions -- normalize state first, then move.
+    await cdp.send(
+        "Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}}
+    )
     await cdp.send(
         "Browser.setWindowBounds",
         {
-            "windowId": window_info["windowId"],
+            "windowId": window_id,
             "bounds": {
                 "left": left,
                 "top": top,
@@ -595,6 +604,13 @@ async def _open_control_window(page, config: BroadcasterConfig) -> None:
                 "windowState": "normal",
             },
         },
+    )
+    applied = await cdp.send("Browser.getWindowBounds", {"windowId": window_id})
+    logger.info(
+        "control window bounds after placement: %r (requested left=%d top=%d)",
+        applied,
+        left,
+        top,
     )
 
 
