@@ -247,13 +247,58 @@ def test_open_control_window_is_a_noop_when_url_is_unset():
     config = BroadcasterConfig(control_window_url=None)
 
     class _FakePage:
-        async def evaluate(self, *_args):
-            raise AssertionError("must not evaluate anything when control_window_url is unset")
+        @property
+        def context(self):
+            raise AssertionError("must not touch context when control_window_url is unset")
 
     asyncio.run(_open_control_window(_FakePage(), config))
 
 
-def test_open_control_window_evaluates_window_open_with_display_bounds(monkeypatch):
+class _FakeCdpSession:
+    def __init__(self, window_id=42):
+        self.sent = []
+        self._window_id = window_id
+
+    async def send(self, method, params=None):
+        self.sent.append((method, params))
+        if method == "Browser.getWindowForTarget":
+            return {"windowId": self._window_id}
+        return {}
+
+
+class _FakeControlPage:
+    def __init__(self):
+        self.load_state_waits = []
+
+    async def wait_for_load_state(self, state):
+        self.load_state_waits.append(state)
+
+
+class _FakeContext:
+    def __init__(self):
+        self.pages = []
+        self.cdp_sessions_requested_for = []
+        self._cdp = _FakeCdpSession()
+
+    async def new_cdp_session(self, page):
+        self.cdp_sessions_requested_for.append(page)
+        return self._cdp
+
+
+class _FakeBroadcastPage:
+    """Simulates window.open() by appending a new page to context.pages --
+    the real signal _open_control_window polls context.pages for."""
+
+    def __init__(self, context):
+        self.context = context
+        self.evaluated = []
+
+    async def evaluate(self, script, arg):
+        self.evaluated.append((script, arg))
+        self.context.pages.append(_FakeControlPage())
+
+
+def test_open_control_window_places_it_via_cdp_setwindowbounds(monkeypatch):
     config = BroadcasterConfig(
         control_window_url="https://localhost:8444/layout-control",
         control_display_index=1,
@@ -264,24 +309,57 @@ def test_open_control_window_evaluates_window_open_with_display_bounds(monkeypat
         lambda index: fake_bounds if index == 1 else (_ for _ in ()).throw(AssertionError(index)),
     )
 
-    calls = []
+    context = _FakeContext()
+    page = _FakeBroadcastPage(context)
 
-    class _FakePage:
-        async def evaluate(self, script, args):
-            calls.append((script, args))
+    asyncio.run(_open_control_window(page, config))
 
-    asyncio.run(_open_control_window(_FakePage(), config))
-
-    assert len(calls) == 1
-    script, args = calls[0]
+    # window.open() itself carries no popup feature string -- CDP does the
+    # actual placement below, since those features are exactly what get
+    # clamped to the calling window's own screen for a different display.
+    assert len(page.evaluated) == 1
+    script, url = page.evaluated[0]
     assert "window.open" in script
-    assert args == [
-        "https://localhost:8444/layout-control",
-        fake_bounds.x,
-        fake_bounds.y,
-        fake_bounds.width,
-        fake_bounds.height,
-    ]
+    assert "left=" not in script
+    assert url == "https://localhost:8444/layout-control"
+
+    assert context.cdp_sessions_requested_for == [context.pages[0]]
+    methods = [method for method, _ in context._cdp.sent]
+    assert methods == ["Browser.getWindowForTarget", "Browser.setWindowBounds"]
+    _, bounds_params = context._cdp.sent[1]
+    assert bounds_params == {
+        "windowId": 42,
+        "bounds": {
+            "left": fake_bounds.x,
+            "top": fake_bounds.y,
+            "width": fake_bounds.width,
+            "height": fake_bounds.height,
+            "windowState": "normal",
+        },
+    }
+    assert context.pages[0].load_state_waits == ["domcontentloaded"]
+
+
+def test_open_control_window_raises_if_the_window_never_appears(monkeypatch):
+    monkeypatch.setattr("ndi_broadcaster.launcher._CONTROL_WINDOW_APPEAR_TIMEOUT_S", 0.05)
+    config = BroadcasterConfig(
+        control_window_url="https://localhost:8444/layout-control",
+        control_display_index=0,
+    )
+    monkeypatch.setattr(
+        "ndi_broadcaster.physical_display.find_display_by_index",
+        lambda _index: _FakeDisplay(x=0, y=0, width=1920, height=1080),
+    )
+
+    class _NeverOpensPage:
+        def __init__(self):
+            self.context = _FakeContext()
+
+        async def evaluate(self, _script, _arg):
+            pass  # Simulates window.open() silently failing to produce a new page.
+
+    with pytest.raises(RuntimeError, match="did not appear"):
+        asyncio.run(_open_control_window(_NeverOpensPage(), config))
 
 
 def test_measure_sck_crop_top_measures_against_the_headroom_window_size():

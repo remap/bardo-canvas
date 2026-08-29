@@ -15,7 +15,7 @@ AUDIO_YAML = Path(__file__).resolve().parent.parent / "config" / "audio.yaml"
 def test_load_audio_config():
     config = load_audio_config(AUDIO_YAML)
     assert config == AudioConfig(
-        enabled=True, input_device="BlackHole 2ch", output_device="BlackHole 2ch"
+        enabled=True, input_device="Loopback Audio", output_device="Loopback Audio"
     )
 
 

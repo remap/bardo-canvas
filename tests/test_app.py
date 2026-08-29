@@ -17,8 +17,8 @@ def test_get_audio_config(client):
     assert response.status_code == 200
     assert response.json() == {
         "enabled": True,
-        "input_device": "BlackHole 2ch",
-        "output_device": "BlackHole 2ch",
+        "input_device": "Loopback Audio",
+        "output_device": "Loopback Audio",
     }
 
 

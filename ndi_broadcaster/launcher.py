@@ -511,6 +511,9 @@ async def _measure_sck_crop_top(page, config: BroadcasterConfig) -> int:
     return await _measure_chrome_overhead_px(page, config, headroom_height)
 
 
+_CONTROL_WINDOW_APPEAR_TIMEOUT_S = 10.0
+
+
 async def _open_control_window(page, config: BroadcasterConfig) -> None:
     """Open config.control_window_url as a second, positioned window in the
     SAME Playwright-controlled Chrome profile the broadcast window lives in.
@@ -519,14 +522,16 @@ async def _open_control_window(page, config: BroadcasterConfig) -> None:
     yt-matrix's /layout-control reach the broadcast page over
     BroadcastChannel, which only bridges tabs within one browser process --
     a control page opened in an operator's own separate everyday browser can
-    never connect to this one. window.open() with popup features
-    (left/top/width/height), evaluated on the already-loaded --app= page, is
-    what actually places it: Chrome honours that feature string directly at
-    creation time, so no extra CDP round trip (context.new_page() plus a
-    Browser.setWindowBounds call) is needed.
+    never connect to this one.
 
-    A no-op when control_window_url is unset -- the default, since most
-    layout-driver apps have no second window to open at all.
+    Placement is via CDP's Browser.setWindowBounds, not window.open()'s
+    left/top popup features -- confirmed live those get silently clamped to
+    the CALLING window's own screen for a *different* display, a deliberate
+    Chrome restriction (cross-screen placement from page script needs the
+    Window Management API's explicit, user-granted permission, which nothing
+    here can obtain). CDP operates through the browser's own automation
+    protocol, one level above the page-script sandbox that restriction
+    exists in, so it can move a window to any connected display regardless.
     """
     if not config.control_window_url:
         return
@@ -542,11 +547,43 @@ async def _open_control_window(page, config: BroadcasterConfig) -> None:
         bounds.width,
         bounds.height,
     )
-    await page.evaluate(
-        """([url, left, top, width, height]) => {
-            window.open(url, "_blank", `popup,left=${left},top=${top},width=${width},height=${height}`);
-        }""",
-        [config.control_window_url, bounds.x, bounds.y, bounds.width, bounds.height],
+
+    context = page.context
+    existing_pages = set(context.pages)
+    # A bare window.open(), no popup feature string: those features are what
+    # get the cross-screen clamp in the first place, and CDP does the actual
+    # placement below regardless of what Chrome would have honoured here.
+    await page.evaluate("(url) => { window.open(url, '_blank'); }", config.control_window_url)
+
+    deadline = time.monotonic() + _CONTROL_WINDOW_APPEAR_TIMEOUT_S
+    control_page = None
+    while time.monotonic() < deadline:
+        new_pages = [p for p in context.pages if p not in existing_pages]
+        if new_pages:
+            control_page = new_pages[0]
+            break
+        await asyncio.sleep(0.1)
+    if control_page is None:
+        raise RuntimeError(
+            f"control window for {config.control_window_url!r} did not appear within "
+            f"{_CONTROL_WINDOW_APPEAR_TIMEOUT_S}s"
+        )
+    await control_page.wait_for_load_state("domcontentloaded")
+
+    cdp = await context.new_cdp_session(control_page)
+    window_info = await cdp.send("Browser.getWindowForTarget")
+    await cdp.send(
+        "Browser.setWindowBounds",
+        {
+            "windowId": window_info["windowId"],
+            "bounds": {
+                "left": bounds.x,
+                "top": bounds.y,
+                "width": bounds.width,
+                "height": bounds.height,
+                "windowState": "normal",
+            },
+        },
     )
 
 
