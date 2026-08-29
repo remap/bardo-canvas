@@ -110,6 +110,63 @@ machine can still create and tear down a virtual display. See
 `_shutdown_with_timeout()`, and its two call sites in `_capture_loop_sck`
 and `_capture_loop`.
 
+### Creating/tearing down the virtual display disrupts windows on the real displays
+
+**Status:** investigated, not a bug in this repo, no fix planned. This is a
+documented, unresolved macOS bug in `CGVirtualDisplay` itself.
+
+**Symptom:** starting or stopping the broadcaster (which creates/tears down
+`vdisplay_helper`'s `CGVirtualDisplay` every time) can visibly disturb window
+arrangement, Spaces, and window positions on the *real*, physical displays —
+not just the virtual one.
+
+**Root cause (confirmed via public sources, not this codebase's own
+debugging):** `CGVirtualDisplay` is a private API that registers a genuine new
+display with WindowServer. Creating or destroying one is indistinguishable,
+at the OS level, from physically plugging/unplugging a real monitor, so it
+fires the same display-reconfiguration notification that drives Spaces
+reassignment and can reposition windows elsewhere. This is not a
+ScreenCaptureKit flag and SCK has no say in it either way — SCK only captures
+whatever display already exists, it doesn't create or remove one. It also
+isn't specific to this app: BetterDisplay's author (arguably the most mature
+public implementation of this same private API) states directly that "the
+root cause of this is a bug in the implementation of CGVirtualDisplay," and
+that it affects Sidecar, AirPlay, and DisplayLink too — every technology
+built on the same underlying mechanism. Zoom-style screen share never hits
+this because it never creates a display at all: it captures an existing real
+display or a single real window in place
+(`SCContentFilter(desktopIndependentWindow:)`), so no display-configuration
+event ever fires.
+
+**Mitigations considered, none adopted (real tradeoffs, not a fix):**
+
+1. System Settings → Desktop & Dock → Mission Control → "Displays have
+   separate Spaces" off reduces some of the Spaces churn a display change
+   triggers, but it's a system-wide UX change (loses per-display menu bar and
+   per-display fullscreen apps) — not something to flip just for this app.
+2. The disruption is triggered by the create/destroy *transition*, not by the
+   virtual display's mere existence. Keeping one virtual display alive across
+   broadcaster restarts (rather than creating fresh and tearing down on every
+   start/stop, as `_capture_loop_sck` does today) would cut exposure from
+   "every restart" to "once per machine session" — closer to how a real
+   monitor just sits there. Not implemented: it means the virtual display
+   would need to outlive the launcher process, a real architecture change,
+   not something to do incidentally.
+
+`vdisplay_helper/main.swift`'s existing choice to place the virtual display's
+origin past the right edge of the real desktop (with a margin) defends
+against a different, unrelated problem — coordinate overlap with the real
+desktop's arrangement — not this one; nothing in this codebase currently
+touches the reflow itself, because there is no known lever in
+`CGVirtualDisplayDescriptor`/`CGVirtualDisplaySettings` that suppresses it.
+
+**Sources:**
+- [BetterDisplay Issue #76 — Sleep woes (does not sleep, windows rearrange etc.)](https://github.com/waydabber/BetterDisplay/issues/76)
+- [BetterDisplay Discussion #3947 — Trying to temporarily disconnect/disable virtual display](https://github.com/waydabber/BetterDisplay/discussions/3947)
+- [Apple Developer Forums — ScreenCaptureKit confuses virtual displays](https://developer.apple.com/forums/thread/786829)
+- [Apple Developer Documentation — Capturing screen content in macOS](https://developer.apple.com/documentation/ScreenCaptureKit/capturing-screen-content-in-macos)
+- [docklockr — The macOS Dock keeps jumping between displays](https://docklockr.com/blog/separate-spaces)
+
 ## Resolved (see design spec addenda for full writeups)
 
 - **sck backend zombie virtual displays / intermittent

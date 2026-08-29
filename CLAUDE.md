@@ -138,6 +138,10 @@ detection must be the full conjunction of unit, vendor, model and serial.
 Diagnosing leaked displays: `python -m ndi_broadcaster.vdisplay_doctor scan|reap|probe` —
 see [`docs/vdisplay-doctor.md`](docs/vdisplay-doctor.md).
 
+**Creating/tearing down the virtual display can disturb windows on the real displays too.**
+This is a documented, unfixed bug in `CGVirtualDisplay` itself (confirmed via BetterDisplay's
+own author), not something wrong in this repo and not an SCK flag — see `docs/bugs.md`.
+
 Keep the display awake during a broadcast (`caffeinate -d`); virtual-display creation was
 observed becoming unreliable while the display slept.
 
