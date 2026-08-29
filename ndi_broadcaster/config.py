@@ -20,6 +20,15 @@ class BroadcasterConfig(BaseModel):
     healthz_timeout_seconds: float = 30.0
     timecode_enabled: bool = True
     timecode_position: Literal["top", "bottom"] = "top"
+    # Opt-in only: the sck backend's broadcast Chrome runs a persistent
+    # profile no other browser instance can share BroadcastChannel with (or
+    # any other same-profile web API) -- an app whose own control surface
+    # needs that, e.g. yt-matrix's /layout-control, sets this to open as a
+    # second window in that SAME profile instead of asking an operator to
+    # find it another way. None (the default) opens nothing. cdp backend
+    # ignores this entirely (headless, no window to place).
+    control_window_url: str | None = None
+    control_display_index: int = 0
 
 
 def load_broadcaster_config(path: Path) -> BroadcasterConfig:

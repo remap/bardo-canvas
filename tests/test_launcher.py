@@ -21,6 +21,7 @@ from ndi_broadcaster.launcher import (
     _LatestFrameSlot,
     _measure_chrome_overhead_px,
     _measure_sck_crop_top,
+    _open_control_window,
     _raise_keyboard_interrupt,
     _sck_chrome_window_size,
     _sender_thread_loop,
@@ -240,6 +241,47 @@ def test_measure_chrome_overhead_px_raises_on_unexpected_inner_width():
 
     with pytest.raises(RuntimeError, match="innerWidth"):
         asyncio.run(_measure_chrome_overhead_px(_FakePage(), config, window_height=2220))
+
+
+def test_open_control_window_is_a_noop_when_url_is_unset():
+    config = BroadcasterConfig(control_window_url=None)
+
+    class _FakePage:
+        async def evaluate(self, *_args):
+            raise AssertionError("must not evaluate anything when control_window_url is unset")
+
+    asyncio.run(_open_control_window(_FakePage(), config))
+
+
+def test_open_control_window_evaluates_window_open_with_display_bounds(monkeypatch):
+    config = BroadcasterConfig(
+        control_window_url="https://localhost:8444/layout-control",
+        control_display_index=1,
+    )
+    fake_bounds = _FakeDisplay(x=1920, y=0, width=1080, height=1920)
+    monkeypatch.setattr(
+        "ndi_broadcaster.physical_display.find_display_by_index",
+        lambda index: fake_bounds if index == 1 else (_ for _ in ()).throw(AssertionError(index)),
+    )
+
+    calls = []
+
+    class _FakePage:
+        async def evaluate(self, script, args):
+            calls.append((script, args))
+
+    asyncio.run(_open_control_window(_FakePage(), config))
+
+    assert len(calls) == 1
+    script, args = calls[0]
+    assert "window.open" in script
+    assert args == [
+        "https://localhost:8444/layout-control",
+        fake_bounds.x,
+        fake_bounds.y,
+        fake_bounds.width,
+        fake_bounds.height,
+    ]
 
 
 def test_measure_sck_crop_top_measures_against_the_headroom_window_size():

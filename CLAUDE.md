@@ -80,6 +80,18 @@ Node driver accumulates state, a documented upstream limitation, not a bug here.
 (`Page.captureScreenshot`, `Page.startScreencast`): all of them were tried and return solid
 black for this app's canvases.
 
+**`control_window_url`** (sck only, `config/broadcaster.yaml`) opts a second, positioned
+window into the SAME Chrome profile the broadcast window runs in — `_open_control_window`
+in `launcher.py`, called once the `--app=` page has loaded. Placed via `window.open()`'s
+popup features (`left`/`top`/`width`/`height`), evaluated on the broadcast page itself, at
+the bounds of `control_display_index` (`physical_display.find_display_by_index`) — not a
+fresh Playwright page/CDP window-bounds call, since Chrome already honours that feature
+string at creation time. `None` (the default) opens nothing; most apps have no second
+window to open. Same profile is the entire point: it's what lets a page like yt-matrix's
+`/layout-control` reach the broadcast page over `BroadcastChannel`, which only bridges tabs
+within one browser process — a control page opened in an operator's own separate everyday
+browser, or the `cdp` backend's headless instance, can never connect to this one.
+
 ## macOS virtual-display gotchas
 
 These have each cost real debugging time and are easy to reintroduce.
@@ -110,6 +122,15 @@ see [`docs/vdisplay-doctor.md`](docs/vdisplay-doctor.md).
 
 Keep the display awake during a broadcast (`caffeinate -d`); virtual-display creation was
 observed becoming unreliable while the display slept.
+
+**`control_window_url`'s exact pixel placement has not been confirmed live.** The popup
+feature string (`window.open(..., "popup,left=...,top=...,width=...,height=..."`) is a
+request, not a guarantee — this exact codebase already found the analogous "requested
+window bounds" path for the *broadcast* window jitters a few pixels run over run (see
+`_CHROME_APP_MODE_HEADROOM_PX`'s comment) and, separately, that a CDP-driven resize of a
+window flush against a display's edge can shift its width unexpectedly. Verify the control
+window actually lands fully on `control_display_index`'s display (not clipped, not
+straddling two displays) on the real machine before relying on it in production.
 
 ## Conventions
 

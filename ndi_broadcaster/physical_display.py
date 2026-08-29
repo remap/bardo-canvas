@@ -78,3 +78,23 @@ def find_physical_display(name_substring: str, expected_width: int, expected_hei
         f"no connected display matched {name_substring!r}; "
         f"connected display names: {known_names}"
     )
+
+
+def find_display_by_index(index: int) -> DisplayInfo:
+    """Return the Nth connected display's real bounds, for placing a window
+    with no resolution requirement to enforce (unlike find_physical_display,
+    which also validates the broadcast display's point resolution against
+    broadcaster.yaml -- an operator console window has no such constraint,
+    it just needs to land somewhere visible).
+
+    Raises ValueError naming every connected display's actual name if index
+    is out of range, mirroring find_physical_display's error style.
+    """
+    screens = _enumerate_screens()
+    if not 0 <= index < len(screens):
+        known_names = [name for name, _ in screens]
+        raise ValueError(
+            f"control_display_index={index} but only {len(screens)} display(s) "
+            f"are connected: {known_names}"
+        )
+    return screens[index][1]

@@ -511,6 +511,45 @@ async def _measure_sck_crop_top(page, config: BroadcasterConfig) -> int:
     return await _measure_chrome_overhead_px(page, config, headroom_height)
 
 
+async def _open_control_window(page, config: BroadcasterConfig) -> None:
+    """Open config.control_window_url as a second, positioned window in the
+    SAME Playwright-controlled Chrome profile the broadcast window lives in.
+
+    Same profile matters beyond convenience: it is what lets a page like
+    yt-matrix's /layout-control reach the broadcast page over
+    BroadcastChannel, which only bridges tabs within one browser process --
+    a control page opened in an operator's own separate everyday browser can
+    never connect to this one. window.open() with popup features
+    (left/top/width/height), evaluated on the already-loaded --app= page, is
+    what actually places it: Chrome honours that feature string directly at
+    creation time, so no extra CDP round trip (context.new_page() plus a
+    Browser.setWindowBounds call) is needed.
+
+    A no-op when control_window_url is unset -- the default, since most
+    layout-driver apps have no second window to open at all.
+    """
+    if not config.control_window_url:
+        return
+    from .physical_display import find_display_by_index
+
+    bounds = find_display_by_index(config.control_display_index)
+    logger.info(
+        "opening control window %r on display %d at %d,%d (%dx%d)",
+        config.control_window_url,
+        config.control_display_index,
+        bounds.x,
+        bounds.y,
+        bounds.width,
+        bounds.height,
+    )
+    await page.evaluate(
+        """([url, left, top, width, height]) => {
+            window.open(url, "_blank", `popup,left=${left},top=${top},width=${width},height=${height}`);
+        }""",
+        [config.control_window_url, bounds.x, bounds.y, bounds.width, bounds.height],
+    )
+
+
 async def _run_sck_session(
     config: BroadcasterConfig,
     context,
@@ -528,6 +567,8 @@ async def _run_sck_session(
         # their own <title>, so SCShareableContent window matching can't
         # rely on any single app's page title.
         await page.evaluate("title => { document.title = title; }", SCK_WINDOW_TITLE)
+
+        await _open_control_window(page, config)
 
         crop_top = await _measure_sck_crop_top(page, config)
         _, native_capture_height = _sck_chrome_window_size(config)
