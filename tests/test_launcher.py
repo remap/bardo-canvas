@@ -19,14 +19,17 @@ from ndi_broadcaster.launcher import (
     _chrome_launch_args,
     _decode_raw_rgba_frame,
     _LatestFrameSlot,
+    _measure_actual_window_height,
     _measure_chrome_overhead_px,
-    _measure_sck_crop_top,
     _open_control_window,
     _raise_keyboard_interrupt,
+    _resolve_sck_crop_geometry,
     _sck_chrome_window_size,
     _sender_thread_loop,
     _shutdown_with_timeout,
     _validate_sck_display_mode,
+    apply_display_mode_override,
+    build_arg_parser,
     resolve_launcher_paths,
     resolve_target_url,
     run,
@@ -99,6 +102,53 @@ def test_resolve_target_url_applies_override():
     # Every other field survives the override.
     assert resolved.fps == 25
     assert resolved == config.model_copy(update={"target_url": "https://localhost:9443/"})
+
+
+def test_apply_display_mode_override_without_flags_is_unchanged():
+    config = BroadcasterConfig(capture_backend="sck", sck_display_mode="virtual")
+
+    assert apply_display_mode_override(config, None, None) == config
+
+
+def test_apply_display_mode_override_applies_display_mode():
+    config = BroadcasterConfig(capture_backend="sck", sck_display_mode="virtual", fps=25)
+
+    resolved = apply_display_mode_override(config, "physical", None)
+
+    assert resolved.sck_display_mode == "physical"
+    # Every other field survives the override.
+    assert resolved.fps == 25
+    assert resolved == config.model_copy(update={"sck_display_mode": "physical"})
+
+
+def test_apply_display_mode_override_applies_physical_display_name():
+    config = BroadcasterConfig(capture_backend="sck", sck_display_mode="virtual")
+
+    resolved = apply_display_mode_override(config, "physical", "SyncMaster")
+
+    assert resolved.sck_display_mode == "physical"
+    assert resolved.sck_physical_display_name == "SyncMaster"
+
+
+def test_build_arg_parser_defaults_to_none():
+    args = build_arg_parser().parse_args([])
+
+    assert args.display_mode is None
+    assert args.physical_display_name is None
+
+
+def test_build_arg_parser_parses_display_mode_and_name():
+    args = build_arg_parser().parse_args(
+        ["--display-mode", "physical", "--physical-display-name", "SyncMaster"]
+    )
+
+    assert args.display_mode == "physical"
+    assert args.physical_display_name == "SyncMaster"
+
+
+def test_build_arg_parser_rejects_unknown_display_mode():
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--display-mode", "bogus"])
 
 
 def test_raise_keyboard_interrupt_raises():
@@ -255,14 +305,17 @@ def test_open_control_window_is_a_noop_when_url_is_unset():
 
 
 class _FakeCdpSession:
-    def __init__(self, window_id=42):
+    def __init__(self, window_id=42, window_bounds_height=None):
         self.sent = []
         self._window_id = window_id
+        self._window_bounds_height = window_bounds_height
 
     async def send(self, method, params=None):
         self.sent.append((method, params))
         if method == "Browser.getWindowForTarget":
             return {"windowId": self._window_id}
+        if method == "Browser.getWindowBounds" and self._window_bounds_height is not None:
+            return {"bounds": {"height": self._window_bounds_height}}
         return {}
 
 
@@ -275,10 +328,10 @@ class _FakeControlPage:
 
 
 class _FakeContext:
-    def __init__(self):
+    def __init__(self, cdp=None):
         self.pages = []
         self.cdp_sessions_requested_for = []
-        self._cdp = _FakeCdpSession()
+        self._cdp = cdp if cdp is not None else _FakeCdpSession()
 
     async def new_cdp_session(self, page):
         self.cdp_sessions_requested_for.append(page)
@@ -407,17 +460,73 @@ def test_open_control_window_raises_if_the_window_never_appears(monkeypatch):
         asyncio.run(_open_control_window(_NeverOpensPage(), config))
 
 
-def test_measure_sck_crop_top_measures_against_the_headroom_window_size():
+class _FakeBroadcastWindowPage:
+    """A page with both .context.new_cdp_session (for
+    _measure_actual_window_height) and .evaluate (for
+    _measure_chrome_overhead_px) -- the two things _resolve_sck_crop_geometry
+    needs from the real broadcast window's page."""
+
+    def __init__(self, granted_height, inner_width, inner_height):
+        self.context = _FakeContext(cdp=_FakeCdpSession(window_bounds_height=granted_height))
+        self._inner_width = inner_width
+        self._inner_height = inner_height
+
+    async def evaluate(self, _script):
+        return [self._inner_width, self._inner_height]
+
+
+def test_measure_actual_window_height_reads_back_via_cdp():
+    page = _FakeBroadcastWindowPage(granted_height=2160, inner_width=3840, inner_height=2132)
+
+    height = asyncio.run(_measure_actual_window_height(page))
+
+    assert height == 2160
+
+
+def test_resolve_sck_crop_geometry_on_a_virtual_display_where_the_request_is_granted_in_full():
+    # Virtual mode: the display is sized to match _sck_chrome_window_size's
+    # request exactly, so the granted height equals the requested one -- this
+    # is the headroom scheme working as designed, unchanged from before this
+    # measurement was added.
     config = BroadcasterConfig(width=3840, height=2160)
-    _, headroom_height = _sck_chrome_window_size(config)
+    _, requested_height = _sck_chrome_window_size(config)
+    page = _FakeBroadcastWindowPage(
+        granted_height=requested_height, inner_width=3840, inner_height=requested_height - 28
+    )
 
-    class _FakePage:
-        async def evaluate(self, _script):
-            return [config.width, headroom_height - 28]
-
-    crop_top = asyncio.run(_measure_sck_crop_top(_FakePage(), config))
+    crop_top, native_capture_height = asyncio.run(_resolve_sck_crop_geometry(page, config))
 
     assert crop_top == 28
+    assert native_capture_height == requested_height
+
+
+def test_resolve_sck_crop_geometry_on_a_physical_display_that_could_not_grant_the_full_request():
+    # Physical mode: the OS hands back a window no taller than the real
+    # display (2160), short of the height+headroom request (2220) -- the bug
+    # this function exists to fix. window chrome (28px) still leaves enough
+    # content (2132px) to cover config.height... just barely not, in this
+    # case (see the next test for when it does cover it).
+    config = BroadcasterConfig(width=3840, height=2100)
+    page = _FakeBroadcastWindowPage(granted_height=2160, inner_width=3840, inner_height=2132)
+
+    crop_top, native_capture_height = asyncio.run(_resolve_sck_crop_geometry(page, config))
+
+    assert crop_top == 28
+    assert native_capture_height == 2160  # the real granted height, not the 2220 that was requested
+
+
+def test_resolve_sck_crop_geometry_raises_when_chrome_leaves_no_room_for_config_height():
+    # The exact live failure this fix targets: a physical display sized to
+    # exactly config.height (2160, required by find_physical_display) can
+    # never fit config.height of content once Chrome's own chrome (28px)
+    # takes some of that same real estate -- there is no display to grow
+    # into, unlike virtual mode. Previously this surfaced as a per-frame
+    # decode crash instead of one clear diagnosis at startup.
+    config = BroadcasterConfig(width=3840, height=2160)
+    page = _FakeBroadcastWindowPage(granted_height=2160, inner_width=3840, inner_height=2132)
+
+    with pytest.raises(RuntimeError, match="28px short of the configured height"):
+        asyncio.run(_resolve_sck_crop_geometry(page, config))
 
 
 def test_run_requires_sck_display_mode_when_backend_is_sck(tmp_path, monkeypatch):
@@ -453,6 +562,55 @@ def test_run_requires_sck_physical_display_name_when_mode_is_physical(tmp_path, 
 
     with pytest.raises(ValueError, match="sck_physical_display_name"):
         run(config_path=str(config_path))
+
+
+def test_run_display_mode_cli_flag_overrides_yaml_virtual_default(tmp_path, monkeypatch):
+    # broadcaster.yaml says virtual (no physical name needed); the CLI flag
+    # flips it to physical for this run only, which should surface the same
+    # "requires sck_physical_display_name" validation virtual never hits --
+    # proving the override reached config before _validate_sck_display_mode,
+    # not just that the flag was accepted.
+    config_path = tmp_path / "broadcaster.yaml"
+    config_path.write_text(
+        textwrap.dedent("""
+            target_url: "https://localhost:8443/"
+            capture_backend: sck
+            sck_display_mode: virtual
+        """)
+    )
+    monkeypatch.setattr(
+        "ndi_broadcaster.launcher.wait_for_healthy",
+        lambda *args, **kwargs: pytest.fail("wait_for_healthy must not run when sck config is invalid"),
+    )
+
+    with pytest.raises(ValueError, match="sck_physical_display_name"):
+        run(config_path=str(config_path), display_mode="physical")
+
+
+def test_run_physical_display_name_cli_flag_satisfies_validation(tmp_path, monkeypatch):
+    config_path = tmp_path / "broadcaster.yaml"
+    config_path.write_text(
+        textwrap.dedent("""
+            target_url: "https://localhost:8443/"
+            capture_backend: sck
+            sck_display_mode: physical
+        """)
+    )
+    checked: list[str] = []
+
+    def fake_wait(url, **kwargs):
+        checked.append(url)
+        raise HealthCheckTimeoutError("stop here, before any browser launches")
+
+    monkeypatch.setattr("ndi_broadcaster.launcher.wait_for_healthy", fake_wait)
+
+    with pytest.raises(HealthCheckTimeoutError):
+        run(config_path=str(config_path), physical_display_name="SyncMaster")
+
+    # Reaching wait_for_healthy at all proves _validate_sck_display_mode
+    # passed, which requires sck_physical_display_name to be set -- the CLI
+    # flag, since broadcaster.yaml itself never sets one.
+    assert checked == ["https://localhost:8443/healthz"]
 
 
 class _FakeSender:

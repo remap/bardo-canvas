@@ -28,6 +28,15 @@ its own server, not yt-matrix's:
 Run from this repo (layout-driver), with its own uv env:
     uv run python broadcast-yt-layout.py
 
+    # Capture a real connected display instead of creating a virtual one:
+    uv run python broadcast-yt-layout.py --display-mode physical \\
+        --physical-display-name "SyncMaster"
+
+--display-mode/--physical-display-name are launcher.run()'s own flags (see
+ndi_broadcaster/launcher.py's apply_display_mode_override) -- this script
+just forwards argv to them the same way it forwards every other yt-matrix
+choice, rather than needing its own copy of that logic.
+
 Also configures logging itself: launcher.py only calls logging.basicConfig
 under its own `if __name__ == "__main__":` guard, which this script -- as a
 separate entry point calling launcher.run() directly -- never executes.
@@ -70,4 +79,5 @@ def _load_with_yt_matrix_control_window(path):
 
 launcher.load_broadcaster_config = _load_with_yt_matrix_control_window
 
-launcher.run()
+_args = launcher.build_arg_parser().parse_args()
+launcher.run(display_mode=_args.display_mode, physical_display_name=_args.physical_display_name)

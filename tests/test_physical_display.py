@@ -46,6 +46,44 @@ def test_find_physical_display_raises_on_resolution_mismatch(monkeypatch):
         find_physical_display("ultrafine", 3840, 2160)
 
 
+def test_find_physical_display_accepts_a_display_taller_than_configured(monkeypatch):
+    # The relaxed case this fix exists for: config.height is deliberately set
+    # smaller than the real display so there's room for Chrome's own window
+    # chrome (see _resolve_sck_crop_geometry in launcher.py) -- a taller real
+    # display must match, not be rejected as a mismatch.
+    target = DisplayInfo(display_id=4, x=1728, y=0, width=3840, height=2160)
+    monkeypatch.setattr(
+        "ndi_broadcaster.physical_display._enumerate_screens",
+        lambda: [("SyncMaster", target)],
+    )
+
+    assert find_physical_display("SyncMaster", 3840, 2128) == target
+
+
+def test_find_physical_display_raises_when_shorter_than_configured(monkeypatch):
+    # A display genuinely shorter than the configured content height can
+    # never work regardless of chrome -- there's nothing left to crop from.
+    monkeypatch.setattr(
+        "ndi_broadcaster.physical_display._enumerate_screens",
+        lambda: [("SyncMaster", DisplayInfo(4, 1728, 0, 3840, 2100))],
+    )
+
+    with pytest.raises(ValueError, match="3840x2100.*3840.*2160"):
+        find_physical_display("SyncMaster", 3840, 2160)
+
+
+def test_find_physical_display_raises_on_width_mismatch_even_when_tall_enough(monkeypatch):
+    # Unlike height, width has no crop mechanism anywhere downstream -- it
+    # stays a hard equality check even when the display is plenty tall.
+    monkeypatch.setattr(
+        "ndi_broadcaster.physical_display._enumerate_screens",
+        lambda: [("SyncMaster", DisplayInfo(4, 1728, 0, 1920, 2160))],
+    )
+
+    with pytest.raises(ValueError, match="1920x2160.*3840.*2128"):
+        find_physical_display("SyncMaster", 3840, 2128)
+
+
 def test_find_display_by_name_matches_case_insensitive_substring(monkeypatch):
     first = DisplayInfo(1, 0, 0, 1728, 1117)
     second = DisplayInfo(3, 1920, 0, 3840, 2160)

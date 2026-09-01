@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import contextlib
@@ -222,6 +223,32 @@ def resolve_target_url(config: BroadcasterConfig, env: dict[str, str]) -> Broadc
     return config.model_copy(update={"target_url": override})
 
 
+def apply_display_mode_override(
+    config: BroadcasterConfig,
+    display_mode: str | None,
+    physical_display_name: str | None,
+) -> BroadcasterConfig:
+    """Layer --display-mode/--physical-display-name CLI flags onto config.
+
+    Same override-only-if-given shape as resolve_target_url, but for a choice
+    an operator wants to flip per run (e.g. "capture the one connected
+    monitor instead of a virtual display, just for this test") without
+    editing broadcaster.yaml, which stays the checked-in default for
+    unattended runs. Neither flag touches capture_backend: sck_display_mode
+    is meaningless under "cdp" and _validate_sck_display_mode already ignores
+    it there, so overriding it is a no-op rather than a surprise backend
+    switch.
+    """
+    updates: dict[str, str] = {}
+    if display_mode is not None:
+        updates["sck_display_mode"] = display_mode
+    if physical_display_name is not None:
+        updates["sck_physical_display_name"] = physical_display_name
+    if not updates:
+        return config
+    return config.model_copy(update=updates)
+
+
 def _chrome_launch_args() -> list[str]:
     """autoplay-policy so app audio (noraebang's track) starts without a user
     gesture there is nobody to make.
@@ -278,9 +305,14 @@ SCK_WINDOW_TITLE = "Layout Driver Broadcaster"
 # without invoking any fullscreen/Space API, so it doesn't have that problem.
 #
 # physical_display mode cannot grow its display to add this headroom (real
-# hardware has no slack), so a physical-mode display sized to exactly
-# config.height can still hit the clipping bug this constant works around
-# for virtual mode -- unfixed here, out of scope for today.
+# hardware has no slack), so the OS can hand back a physical-mode window
+# shorter than this headroom requests -- previously a per-frame decode crash
+# (config.height assumed available, when Chrome's own chrome could leave
+# less). _resolve_sck_crop_geometry now measures the real granted window
+# height instead of assuming this constant was honored, and raises one clear
+# error at startup if what's left after cropping Chrome's chrome off still
+# doesn't cover config.height -- true when a physical display has no slack to
+# grow into, which this constant can't fix by itself.
 _CHROME_APP_MODE_HEADROOM_PX = 60
 
 # Both browser.close() and Playwright's own async_playwright() context-manager
@@ -323,10 +355,11 @@ def _sck_chrome_window_size(config: BroadcasterConfig) -> tuple[int, int]:
     config.width x (config.height + _CHROME_APP_MODE_HEADROOM_PX) specifically
     so this taller window fits without the OS clipping it back down -- see
     _CHROME_APP_MODE_HEADROOM_PX's comment. Physical mode's display is real
-    hardware and cannot grow to match; find_physical_display's resolution
-    check still requires display.width/height == config.width/height there,
-    so a physical display sized to exactly config.height keeps the old
-    clipping bug this function's height formula would otherwise reintroduce.
+    hardware and cannot grow to match -- find_physical_display's resolution
+    check still requires display.width/height == config.width/height there --
+    so the height this function returns is only ever a request in that mode;
+    _resolve_sck_crop_geometry measures what the OS actually granted instead
+    of assuming this value was honored.
     """
     return config.width, config.height + _CHROME_APP_MODE_HEADROOM_PX
 
@@ -481,34 +514,81 @@ async def _measure_chrome_overhead_px(page, config: BroadcasterConfig, window_he
     return overhead
 
 
-async def _measure_sck_crop_top(page, config: BroadcasterConfig) -> int:
-    """The crop_top SckCapture should use for the window as actually launched.
+async def _measure_actual_window_height(page) -> int:
+    """The real height Chrome's broadcast window was actually granted, read
+    back via CDP -- the same Browser.getWindowBounds call
+    _open_control_window already uses to confirm its own window's placement,
+    applied here to the main window instead.
 
-    The window is launched at config.height + _CHROME_APP_MODE_HEADROOM_PX --
+    _sck_chrome_window_size's returned height is only a request passed to
+    --window-size. A virtual display sized to match it (see
+    _capture_loop_sck) always grants it in full, so the request and the
+    reality happen to agree there -- but a physical display cannot grow
+    past its own real height (find_physical_display already requires it to
+    equal config.width/height exactly), so the OS can hand back a shorter
+    window there instead of the taller one requested for headroom (see
+    _CHROME_APP_MODE_HEADROOM_PX). Measuring what was actually granted,
+    rather than assuming the request was honored, is what keeps
+    _resolve_sck_crop_geometry's arithmetic correct in both cases.
+    """
+    cdp = await page.context.new_cdp_session(page)
+    window_info = await cdp.send("Browser.getWindowForTarget")
+    bounds = await cdp.send("Browser.getWindowBounds", {"windowId": window_info["windowId"]})
+    return bounds["bounds"]["height"]
+
+
+async def _resolve_sck_crop_geometry(page, config: BroadcasterConfig) -> tuple[int, int]:
+    """The (crop_top, native_capture_height) SckCapture should use for the
+    window as actually launched -- both measured against the real granted
+    window height (_measure_actual_window_height), not the taller height
+    _sck_chrome_window_size requested for headroom.
+
+    The window is requested at config.height + _CHROME_APP_MODE_HEADROOM_PX --
     generous headroom, not a precise target (see that constant's comment) --
     specifically so it's never clipped by the display no matter how the real
-    chrome overhead jitters this run. That headroom is real, unused black
-    space below the composited wall inside the window (rescale() pins scale
-    to 1.0 via the width ratio, so the wall itself is never stretched to
-    fill it).
+    chrome overhead jitters this run. On a virtual display, sized to match
+    that request, the headroom is granted in full: it becomes real, unused
+    black space below the composited wall inside the window (rescale() pins
+    scale to 1.0 via the width ratio, so the wall itself is never stretched
+    to fill it), and native_capture_height crops that leftover margin off
+    the bottom of every frame -- pure numpy slicing on an already-delivered
+    pixel buffer, with no OS window manager involved. On a physical display
+    there is no such margin to grant: the window comes back at most as tall
+    as the display itself, headroom included, so this measures what was
+    really granted instead of assuming the request.
 
     An earlier version of this function resized the actual OS window down to
-    remove that leftover margin (via CDP's Browser.setWindowBounds), so
-    SckCapture could crop only the top as it always had. That was abandoned:
-    live testing found this specific window (positioned flush against the
-    virtual display's exact width and height, zero slack on any edge) came
-    back from a resize with its width *also* shifted by -20px, reproducibly,
-    regardless of what bounds were requested -- a small-scale test window
-    with real margin on a real display did not reproduce this, so it looks
-    tied to being flush against the display edge, not a general CDP quirk,
-    but chasing it further wasn't worth it. The window is left at its full
-    launched size instead, and SckCapture crops the leftover margin off the
-    bottom of every frame too (its native_capture_height parameter) -- pure
-    numpy slicing on an already-delivered pixel buffer, with no OS window
-    manager involved to reintroduce this class of surprise.
+    remove virtual mode's leftover margin (via CDP's Browser.setWindowBounds),
+    so SckCapture could crop only the top as it always had. That was
+    abandoned: live testing found this specific window (positioned flush
+    against the virtual display's exact width and height, zero slack on any
+    edge) came back from a resize with its width *also* shifted by -20px,
+    reproducibly, regardless of what bounds were requested -- a small-scale
+    test window with real margin on a real display did not reproduce this, so
+    it looks tied to being flush against the display edge, not a general CDP
+    quirk, but chasing it further wasn't worth it.
+
+    Raises RuntimeError if what's left after cropping Chrome's own chrome off
+    the top is still shorter than config.height -- true on a physical display
+    with no slack to grow into, and something to know at startup rather than
+    guess at from a per-frame decode crash: nothing downstream of this point
+    can recover from a window that has no room for the configured height.
     """
-    _, headroom_height = _sck_chrome_window_size(config)
-    return await _measure_chrome_overhead_px(page, config, headroom_height)
+    actual_height = await _measure_actual_window_height(page)
+    crop_top = await _measure_chrome_overhead_px(page, config, actual_height)
+    available = actual_height - crop_top
+    if available < config.height:
+        raise RuntimeError(
+            f"broadcast window is {actual_height}px tall and Chrome's own "
+            f"window chrome takes {crop_top}px of that, leaving {available}px "
+            f"of content -- {config.height - available}px short of the "
+            f"configured height ({config.height}). A virtual display can grow "
+            "to make room for this; a physical one can't (its resolution must "
+            "already match config.height exactly -- see find_physical_display). "
+            "Lower height in broadcaster.yaml by at least that much, or use "
+            "--display-mode virtual instead."
+        )
+    return crop_top, actual_height
 
 
 _CONTROL_WINDOW_APPEAR_TIMEOUT_S = 10.0
@@ -634,8 +714,7 @@ async def _run_sck_session(
 
         await _open_control_window(page, config)
 
-        crop_top = await _measure_sck_crop_top(page, config)
-        _, native_capture_height = _sck_chrome_window_size(config)
+        crop_top, native_capture_height = await _resolve_sck_crop_geometry(page, config)
 
         frame_slot = _LatestFrameSlot()
         sender_thread = threading.Thread(
@@ -810,6 +889,8 @@ def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
 def run(
     config_path: str | None = None,
     audio_config_path: str | None = None,
+    display_mode: str | None = None,
+    physical_display_name: str | None = None,
 ) -> None:
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     env = dict(os.environ)
@@ -821,6 +902,7 @@ def run(
 
     config = load_broadcaster_config(Path(config_path))
     config = resolve_target_url(config, env)
+    config = apply_display_mode_override(config, display_mode, physical_display_name)
     _validate_sck_display_mode(config)
 
     wait_for_healthy(
@@ -877,6 +959,41 @@ def run(
         sender.close()
 
 
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Shared by this module's own __main__ and by any app-specific entry
+    point that calls run() directly instead (e.g. yt-matrix's
+    broadcast-yt-layout.py, which forwards these same two flags into
+    run()'s display_mode/physical_display_name kwargs) -- one flag
+    definition, not a copy per entry point.
+    """
+    parser = argparse.ArgumentParser(description="Layout-driver NDI broadcaster")
+    parser.add_argument(
+        "--display-mode",
+        choices=["virtual", "physical"],
+        default=None,
+        help=(
+            "Override config/broadcaster.yaml's sck_display_mode for this run only "
+            "(sck backend only; ignored under cdp). 'physical' captures a real "
+            "connected display instead of creating an off-screen one -- pair with "
+            "--physical-display-name unless broadcaster.yaml already sets "
+            "sck_physical_display_name."
+        ),
+    )
+    parser.add_argument(
+        "--physical-display-name",
+        default=None,
+        help=(
+            "Case-insensitive substring match against a connected display's name "
+            "(e.g. 'SyncMaster' -- see `python -m ndi_broadcaster.vdisplay_doctor "
+            "scan` for connected names). Only takes effect with --display-mode "
+            "physical; the matched display's reported resolution must equal "
+            "broadcaster.yaml's width/height exactly."
+        ),
+    )
+    return parser
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format=log_format(dict(os.environ)))
-    run()
+    args = build_arg_parser().parse_args()
+    run(display_mode=args.display_mode, physical_display_name=args.physical_display_name)

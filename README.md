@@ -251,6 +251,29 @@ Additional `broadcaster.yaml` fields this backend uses:
   resolution, and the broadcaster fails fast with the mismatch rather than silently
   capturing at the wrong resolution.
 
+**Switching to a physical display without editing `broadcaster.yaml`.** `--display-mode`
+and `--physical-display-name` override `sck_display_mode`/`sck_physical_display_name` for
+one run, on both the generic entry point and any app-specific one that forwards argv into
+`launcher.run()` (e.g. yt-matrix's `broadcast-yt-layout.py`):
+
+```bash
+uv run python -m ndi_broadcaster.launcher \
+  --display-mode physical --physical-display-name "UltraFine"
+
+# or, from yt-matrix's own repo, against the shared broadcaster in this one:
+uv run python broadcast-yt-layout.py \
+  --display-mode physical --physical-display-name "UltraFine"
+```
+
+Check the exact connected name first with `python -m ndi_broadcaster.vdisplay_doctor scan`
+(below) — it lists every online display, and a display that's asleep or otherwise not
+enumerable by `NSScreen` won't appear there either, which is the same set
+`find_physical_display` matches against. `--physical-display-name` only takes effect
+alongside `--display-mode physical`; omitting `--display-mode` leaves `broadcaster.yaml`'s
+own `sck_display_mode` in charge, virtual or physical either way. See
+`ndi_broadcaster/launcher.py`'s `apply_display_mode_override` for the override itself and
+`build_arg_parser` for the flag definitions both entry points share.
+
 ### Timecode overlay
 
 A configurable `hh:mm:ss:ff` elapsed-time overlay burned into every frame before NDI
